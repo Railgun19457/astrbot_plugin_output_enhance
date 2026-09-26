@@ -1,0 +1,7 @@
+name: astrbot_plugin_output_enhance
+display_name: 输出增强
+desc: 增强 Bot 的输出表现，按配置调整回复内容。
+short_desc: 增强 Bot 的输出表现
+version: v0.1.0
+author: Railgun19457
+repo: https://github.com/Railgun19457/astrbot_plugin_output_enhance

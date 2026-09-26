@@ -1,0 +1,8 @@
+dev/
+__pycache__/
+core/__pycache__/
+tools/__pycache__/
+.vscode/
+.ruff_cache/
+data/
+temp/

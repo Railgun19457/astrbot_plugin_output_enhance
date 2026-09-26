@@ -1,0 +1,339 @@
+{
+  "llm_tool_options": {
+    "type": "list",
+    "description": "LLM 工具",
+    "hint": "选择向 LLM 暴露的主动工具。未勾选的工具不会注册，模型也就看不到、无法调用。合并转发和文转图片的被动处理不受此配置影响。",
+    "options": [
+      "send_forward_message",
+      "send_text_as_image"
+    ],
+    "labels": [
+      "自定义合并转发",
+      "文本转图片发送"
+    ],
+    "default": [
+      "send_forward_message",
+      "send_text_as_image"
+    ]
+  },
+  "prompt_injection": {
+    "type": "object",
+    "description": "上下文注入",
+    "hint": "向模型注入输出标记说明，让模型知道可以使用标记控制 @、引用、分段和转图片。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "自动注入标记说明",
+        "hint": "只注入已开启功能对应的部分。关闭后不再注入，可将下方提示词复制进人格提示词自行维护。",
+        "default": true
+      },
+      "prompt": {
+        "type": "text",
+        "description": "自定义注入内容",
+        "hint": "留空时按已开启的功能自动拼装。填写后原样注入，不再随功能开关裁剪。",
+        "default": ""
+      }
+    }
+  },
+  "segmented_reply": {
+    "type": "object",
+    "description": "分段回复",
+    "hint": "把一条回复拆成多条发送，模拟真人打字节奏。使用前请关闭 AstrBot 平台设置里的分段回复。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用分段回复",
+        "default": false
+      },
+      "words_threshold": {
+        "type": "int",
+        "description": "分段阈值字数",
+        "hint": "回复总字数达到该值时不分段，避免刷屏。",
+        "default": 150
+      },
+      "sentences_threshold": {
+        "type": "int",
+        "description": "分段阈值句数",
+        "hint": "拆分后的句数超过该值时不分段。",
+        "default": 8
+      },
+      "split_chars": {
+        "type": "list",
+        "description": "分段字符",
+        "hint": "在这些字符处切分，支持填写正则表达式。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "。",
+          "？",
+          "！",
+          "……",
+          "~"
+        ]
+      },
+      "pair_symbols": {
+        "type": "list",
+        "description": "成对符号",
+        "hint": "填写形如 （） 的成对符号，位于其中的内容不触发分段。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "\"\"",
+          "''",
+          "（）",
+          "()",
+          "【】",
+          "[]",
+          "{}",
+          "《》",
+          "「」",
+          "『』",
+          "“”",
+          "‘’"
+        ]
+      },
+      "typing_speed": {
+        "type": "float",
+        "description": "打字速度",
+        "hint": "每秒字符数。每段发送前按该速度计算等待时间，数值越大发送越快。",
+        "default": 8.0
+      },
+      "trim_chars": {
+        "type": "list",
+        "description": "清理句尾字符",
+        "hint": "分段后从每段末尾移除这些字符。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "。",
+          "！",
+          "？",
+          "，",
+          "；",
+          "、",
+          ",",
+          ".",
+          ";",
+          " "
+        ]
+      }
+    }
+  },
+  "quote_reply": {
+    "type": "object",
+    "description": "引用回复",
+    "hint": "支持模型用标记引用消息，也支持按间隔自动引用。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用引用回复",
+        "hint": "关闭后不解析引用标记，模型输出的标记会被直接移除。",
+        "default": true
+      },
+      "auto_quote_interval": {
+        "type": "int",
+        "description": "自动引用间隔",
+        "hint": "回复时若距原消息已间隔这么多条消息，则自动引用原消息。设为 0 关闭自动引用，仅依靠模型输出的标记。",
+        "default": 0
+      }
+    }
+  },
+  "at_parse": {
+    "type": "object",
+    "description": "@ 解析",
+    "hint": "解析模型输出的 @ 标记为真正的 At 消息段。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用 @ 解析",
+        "default": true
+      },
+      "allow_at_all": {
+        "type": "bool",
+        "description": "允许 @全体成员",
+        "hint": "关闭时 @全体成员的标记会被忽略并移除。",
+        "default": false
+      }
+    }
+  },
+  "forward": {
+    "type": "object",
+    "description": "合并转发",
+    "hint": "长文本自动折叠为一条合并转发消息。此配置只控制被动触发，不影响 LLM 工具。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用合并转发",
+        "default": false
+      },
+      "text_threshold": {
+        "type": "int",
+        "description": "长度阈值",
+        "hint": "文本字数达到该值时改为合并转发。",
+        "default": 500
+      },
+      "sentences_threshold": {
+        "type": "int",
+        "description": "句数阈值",
+        "hint": "分段后的消息条数超过该值时改为合并转发。",
+        "default": 10
+      },
+      "default_nickname": {
+        "type": "string",
+        "description": "默认转发昵称",
+        "hint": "合并转发节点的默认显示昵称，工具调用未指定昵称时使用。",
+        "default": "AstrBot"
+      }
+    }
+  },
+  "text_to_image": {
+    "type": "object",
+    "description": "文转图片",
+    "hint": "长文本自动渲染成图片发送。此配置只控制被动触发，不影响 LLM 工具。使用前请关闭 AstrBot 的文本转图片。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用文转图片",
+        "default": false
+      },
+      "text_threshold": {
+        "type": "int",
+        "description": "文本长度阈值",
+        "hint": "文本字数达到该值时渲染为图片。",
+        "default": 1000
+      },
+      "style_template": {
+        "type": "string",
+        "description": "默认样式模板路径",
+        "hint": "可填模板名或模板文件夹路径。留空则使用内置默认样式。",
+        "default": ""
+      },
+      "font_path": {
+        "type": "string",
+        "description": "默认字体路径",
+        "hint": "支持网络 URL 和本地路径。填入 URL 时，首次使用会下载到插件数据目录，并自动将该配置改写为本地路径。",
+        "default": ""
+      },
+      "auto_page": {
+        "type": "bool",
+        "description": "自动分页",
+        "hint": "图片过长时自动拆成多张。",
+        "default": true
+      }
+    }
+  },
+  "error_intercept": {
+    "type": "object",
+    "description": "错误拦截",
+    "hint": "拦截包含错误信息的输出，避免把报错暴露给用户。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用错误拦截",
+        "default": true
+      },
+      "keywords": {
+        "type": "list",
+        "description": "错误关键词",
+        "hint": "输出文本包含任一关键词时拦截，子串匹配即可。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "Traceback (most recent call last)",
+          "Error occurred while processing agent request",
+          "在调用插件",
+          "LLM 请求失败",
+          "API 调用失败"
+        ]
+      },
+      "plugin_error": {
+        "type": "bool",
+        "description": "拦截插件异常回显",
+        "hint": "拦截 AstrBot 在插件抛出异常时自动回显的报错消息。",
+        "default": true
+      },
+      "user_notice": {
+        "type": "string",
+        "description": "用户提示",
+        "hint": "拦截后向原会话发送的提示内容。留空则不发送任何提示。",
+        "default": ""
+      },
+      "forward_sessions": {
+        "type": "list",
+        "description": "错误转发会话",
+        "hint": "把完整错误内容转发到这些会话，填写会话 UMO（如 aiocqhttp:GroupMessage:123456）。",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  },
+  "message_block": {
+    "type": "object",
+    "description": "消息拦截",
+    "hint": "命中关键词的回复整条不发送。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用消息拦截",
+        "default": false
+      },
+      "keywords": {
+        "type": "list",
+        "description": "关键词列表",
+        "hint": "输出文本包含任一关键词时整条丢弃。",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  },
+  "text_cleanup": {
+    "type": "object",
+    "description": "文本清洗",
+    "hint": "清理回复中的多余内容和符号。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用文本清洗",
+        "default": false
+      },
+      "max_length": {
+        "type": "int",
+        "description": "长度阈值",
+        "hint": "文本字数达到该值时不清洗，避免误伤长文。",
+        "default": 200
+      },
+      "pair_symbols": {
+        "type": "list",
+        "description": "清除成对符号内内容",
+        "hint": "填写形如 [text] 的成对符号，表示清除该符号包裹的内容。text 只是占位符，本身不参与匹配。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "[text]",
+          "(text)",
+          "（text）",
+          "【text】",
+          "&&text&&"
+        ]
+      },
+      "regex": {
+        "type": "list",
+        "description": "正则清洗",
+        "hint": "按顺序对文本执行这些正则替换，匹配到的内容会被移除。",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  }
+}
