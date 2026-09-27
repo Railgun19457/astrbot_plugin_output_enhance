@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.3
+
+- 文转图片可在 Pillow 和 AstrBot T2I 之间选择。
+- Pillow 默认使用 Noto Sans SC 和 Noto Emoji，首次从 CDN 下载。
+- Pillow 模板改为 JSON 文件，自带亮色和暗色，也支持自定义模板。
+
 ## v0.1.2
 
 - 合并转发节点支持按顺序混排文本、图片、表情和 @。本地图片仅限当前工作区和临时目录。

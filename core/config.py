@@ -93,8 +93,10 @@ class PluginConfig:
 
     t2i_enable: bool = False
     t2i_text_threshold: int = 1000
-    style_template: str = ""
+    t2i_renderer: str = "pillow"
+    pillow_template: str = ""
     font_path: str = ""
+    emoji_font_path: str = ""
     auto_page: bool = True
 
     error_enable: bool = True
@@ -261,8 +263,20 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
         default_nickname=str(forward.get("default_nickname") or "AstrBot"),
         t2i_enable=_as_bool(text_to_image.get("enable"), False),
         t2i_text_threshold=_as_int(text_to_image.get("text_threshold"), 1000, 1),
-        style_template=str(text_to_image.get("style_template") or ""),
-        font_path=str(text_to_image.get("font_path") or ""),
+        t2i_renderer=(
+            "astrbot_t2i"
+            if text_to_image.get("renderer") == "astrbot_t2i"
+            else "pillow"
+        ),
+        pillow_template=str(text_to_image.get("pillow_template") or ""),
+        font_path=str(
+            text_to_image.get("font_path")
+            or "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
+        ),
+        emoji_font_path=str(
+            text_to_image.get("emoji_font_path")
+            or "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notoemoji/NotoEmoji[wght].ttf"
+        ),
         auto_page=_as_bool(text_to_image.get("auto_page"), True),
         error_enable=_as_bool(error.get("enable"), True),
         error_keywords=_as_str_list(

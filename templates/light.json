@@ -1,0 +1,11 @@
+{
+  "width": 920,
+  "margin": 56,
+  "font_size": 32,
+  "line_height": 1.6,
+  "max_height": 1800,
+  "accent_width": 8,
+  "background": "#F7F6F3",
+  "foreground": "#222222",
+  "accent": "#B88458"
+}

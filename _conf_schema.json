@@ -217,17 +217,37 @@
         "hint": "文本字数达到该值时渲染为图片。",
         "default": 1000
       },
-      "style_template": {
+      "renderer": {
         "type": "string",
-        "description": "默认样式模板路径",
-        "hint": "可填模板名或模板文件夹路径。留空则使用内置默认样式。",
+        "description": "渲染器",
+        "hint": "Pillow 在本地渲染，轻量快速，可自定义字体，不支持数学公式。AstrBot T2I 使用框架渲染服务，可渲染 Markdown 和公式，速度较慢；模板样式在 AstrBot 的文转图配置里设置。",
+        "options": [
+          "pillow",
+          "astrbot_t2i"
+        ],
+        "labels": [
+          "Pillow",
+          "AstrBot T2I"
+        ],
+        "default": "pillow"
+      },
+      "pillow_template": {
+        "type": "string",
+        "description": "Pillow 模板",
+        "hint": "仅在渲染器选择 Pillow 时生效。留空使用插件自带的亮色模板 templates/light.json，暗色模板是 templates/dark.json。也可以填写自己的 JSON 模板绝对路径。",
         "default": ""
       },
       "font_path": {
         "type": "string",
-        "description": "默认字体路径",
-        "hint": "支持网络 URL 和本地路径。填入 URL 时，首次使用会下载到插件数据目录，并自动将该配置改写为本地路径。",
-        "default": ""
+        "description": "正文字体",
+        "hint": "Pillow 排版正文使用的字体，支持网络 URL 和本地路径。默认是 Noto Sans SC，覆盖中文和常见符号；填入 URL 时首次使用会从 CDN 下载到插件数据目录，并自动改写为本地路径。",
+        "default": "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
+      },
+      "emoji_font_path": {
+        "type": "string",
+        "description": "Emoji 字体",
+        "hint": "正文遇到 emoji 时使用的字体。默认是 Noto Emoji；填入 URL 时同样会下载到插件数据目录并改写为本地路径。",
+        "default": "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notoemoji/NotoEmoji[wght].ttf"
       },
       "auto_page": {
         "type": "bool",
