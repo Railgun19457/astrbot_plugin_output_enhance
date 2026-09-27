@@ -77,6 +77,7 @@ class PluginConfig:
     seg_split_chars: list[str] = field(default_factory=list)
     seg_pair_symbols: list[str] = field(default_factory=list)
     seg_typing_speed: float = 8.0
+    seg_trim_head_chars: list[str] = field(default_factory=list)
     seg_trim_chars: list[str] = field(default_factory=list)
 
     quote_enable: bool = True
@@ -245,9 +246,10 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
             ],
         ),
         seg_typing_speed=_as_float(segmented.get("typing_speed"), 8.0),
+        seg_trim_head_chars=_as_str_list(segmented.get("trim_head_chars"), ["\n"]),
         seg_trim_chars=_as_str_list(
             segmented.get("trim_chars"),
-            ["。", "！", "？", "，", "；", "、", ",", ".", ";", " "],
+            ["。", "！", "？", "，", "；", "、", ",", ".", ";", " ", "\n"],
         ),
         quote_enable=_as_bool(quote.get("enable"), True),
         auto_quote_interval=_as_int(quote.get("auto_quote_interval"), 0),

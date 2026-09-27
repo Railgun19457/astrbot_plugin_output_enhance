@@ -5,19 +5,26 @@ from __future__ import annotations
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import (
     At,
+    AtAll,
     BaseMessageComponent,
+    Face,
+    File,
     Image,
     Node,
     Nodes,
     Plain,
+    Record,
     Reply,
+    Video,
 )
 
 from .config import PluginConfig, supports
 from .markers import SegmentBreak, parse_markers
-from .text_ops import cleanup_text, split_sentences
+from .text_ops import cleanup_text, split_sentences, trim_segment
 
-_TEXT_TYPES = (Plain, At, Reply)
+_TEXT_TYPES = (Plain, At, AtAll, Reply)
+# Components a forward node can carry without dropping them.
+_FORWARD_CONTENT = (Plain, At, AtAll, Image, Record, Video, File, Face)
 
 
 def _plain_text(components: list[BaseMessageComponent | SegmentBreak]) -> str:
@@ -31,7 +38,37 @@ def _only_text(components: list[BaseMessageComponent | SegmentBreak]) -> bool:
 def _without_breaks(
     components: list[BaseMessageComponent | SegmentBreak],
 ) -> list[BaseMessageComponent]:
-    return [comp for comp in components if not isinstance(comp, SegmentBreak)]
+    """Drop segment breaks and the newlines models wrap around them.
+
+    Args:
+        components: Chain that may contain internal segment breaks.
+
+    Returns:
+        Components with the breaks removed. Newlines immediately before and
+        after a break are removed so an unsplit reply does not keep a blank
+        line in place of ``{{SEG}}``.
+    """
+    cleaned: list[BaseMessageComponent] = []
+    after_break = False
+    for comp in components:
+        if isinstance(comp, SegmentBreak):
+            if cleaned and isinstance(cleaned[-1], Plain):
+                text = trim_segment(cleaned[-1].text, [], ["\n"])
+                if text:
+                    cleaned[-1] = Plain(text)
+                else:
+                    cleaned.pop()
+            after_break = True
+            continue
+        if after_break and isinstance(comp, Plain):
+            text = trim_segment(comp.text, ["\n"], [])
+            after_break = False
+            if text:
+                cleaned.append(Plain(text))
+            continue
+        after_break = False
+        cleaned.append(comp)
+    return cleaned
 
 
 def _build_reply(event: AstrMessageEvent) -> Reply | None:
@@ -122,20 +159,88 @@ def prepare_chain(
         converted.insert(0, reply)
 
     if not _only_text(converted) or _exceeds_passive_threshold(plain, config):
+        if explicit_segments and _forward_keeps_segments(converted, config, platform):
+            return _group_segments(converted, config), force_image
         return [_without_breaks(converted)], force_image
 
-    if explicit_segments and config.seg_enable:
-        return _group_segments(converted), force_image
-
-    if config.seg_enable and plain and len(plain) < config.seg_words_threshold:
-        sentences = split_sentences(plain, config)
-        if 1 < len(sentences) <= config.seg_sentences_threshold:
-            prefix = [
-                comp for comp in converted if not isinstance(comp, Plain | SegmentBreak)
-            ]
-            return [prefix + [Plain(sentence)] for sentence in sentences], force_image
+    candidates = _candidate_segments(
+        converted, config, explicit_segments=explicit_segments
+    )
+    if candidates and _within_segment_limits(plain, len(candidates), config):
+        return candidates, force_image
+    # Too many messages to send separately. Keep the splits only when the
+    # forward sentence limit also trips, so each split becomes one node
+    # instead of being flattened into a single forward message.
+    if candidates and _forward_keeps_segments(converted, config, platform):
+        return candidates, force_image
 
     return [_without_breaks(converted)], force_image
+
+
+def _candidate_segments(
+    components: list[BaseMessageComponent | SegmentBreak],
+    config: PluginConfig,
+    *,
+    explicit_segments: bool,
+) -> list[list[BaseMessageComponent]] | None:
+    """Build the splits a reply would use, before either limit rejects them.
+
+    Args:
+        components: Chain after marker parsing.
+        config: Segment switches and split rules.
+        explicit_segments: Whether the model emitted at least one ``{{SEG}}``.
+
+    Returns:
+        One group per message, or None when there is nothing to split.
+        Automatic splitting still requires the reply to stay under the word
+        limit; explicit markers are counted even when that limit is exceeded.
+    """
+    if not config.seg_enable:
+        return None
+    if explicit_segments:
+        groups = _group_segments(components, config)
+        return groups if len(groups) > 1 else None
+
+    plain = _plain_text(components)
+    if not plain or len(plain) >= config.seg_words_threshold:
+        return None
+    sentences = split_sentences(plain, config)
+    if len(sentences) <= 1:
+        return None
+    prefix = [comp for comp in components if not isinstance(comp, Plain | SegmentBreak)]
+    return [prefix + [Plain(sentence)] for sentence in sentences]
+
+
+def _within_segment_limits(text: str, count: int, config: PluginConfig) -> bool:
+    """Return whether this many splits may be sent as separate messages."""
+    return (
+        len(text) < config.seg_words_threshold
+        and count <= config.seg_sentences_threshold
+    )
+
+
+def _forward_keeps_segments(
+    components: list[BaseMessageComponent | SegmentBreak],
+    config: PluginConfig,
+    platform: str,
+) -> bool:
+    """Keep rejected splits when forwarding would otherwise flatten them.
+
+    Args:
+        components: Chain that may still contain internal segment breaks.
+        config: Forward switch and sentence threshold.
+        platform: Current platform type.
+
+    Returns:
+        True when the platform can forward and the number of explicit splits
+        is above the forward sentence threshold.
+    """
+    if not config.forward_enable or not supports(platform, "forward"):
+        return False
+    return (
+        sum(isinstance(comp, SegmentBreak) for comp in components) + 1
+        > config.forward_sentences_threshold
+    )
 
 
 def _exceeds_passive_threshold(text: str, config: PluginConfig) -> bool:
@@ -147,14 +252,18 @@ def _exceeds_passive_threshold(text: str, config: PluginConfig) -> bool:
 
 def _group_segments(
     components: list[BaseMessageComponent | SegmentBreak],
+    config: PluginConfig,
 ) -> list[list[BaseMessageComponent]]:
     """Group components around explicit ``{{SEG}}`` breaks.
 
     Args:
         components: Chain containing internal segment breaks.
+        config: Characters removed from the edges of each segment.
 
     Returns:
         One component group for each message that should be sent separately.
+        Newlines wrapped around a marker are removed with the configured
+        head and tail characters.
     """
     groups: list[list[BaseMessageComponent]] = []
     current: list[BaseMessageComponent] = []
@@ -167,7 +276,33 @@ def _group_segments(
         current.append(comp)
     if current:
         groups.append(current)
-    return [group for group in groups if group] or [[]]
+    trimmed = [_trim_group(group, config) for group in groups]
+    return [group for group in trimmed if group] or [[]]
+
+
+def _trim_group(
+    group: list[BaseMessageComponent],
+    config: PluginConfig,
+) -> list[BaseMessageComponent]:
+    """Trim the outer text edges of one explicit segment."""
+    indexes = [index for index, comp in enumerate(group) if isinstance(comp, Plain)]
+    if not indexes:
+        return group
+    trimmed = list(group)
+    first, last = indexes[0], indexes[-1]
+    if first == last:
+        text = trim_segment(
+            trimmed[first].text,
+            config.seg_trim_head_chars,
+            config.seg_trim_chars,
+        )
+        trimmed[first] = Plain(text) if text else None
+    else:
+        head = trim_segment(trimmed[first].text, config.seg_trim_head_chars, [])
+        tail = trim_segment(trimmed[last].text, [], config.seg_trim_chars)
+        trimmed[first] = Plain(head) if head else None
+        trimmed[last] = Plain(tail) if tail else None
+    return [comp for comp in trimmed if comp is not None]
 
 
 def should_forward(
@@ -188,7 +323,7 @@ def should_forward(
     """
     if not config.forward_enable or not supports(platform, "forward"):
         return False
-    if not _only_text(chain):
+    if not all(isinstance(comp, (*_FORWARD_CONTENT, Reply)) for comp in chain):
         return False
     text = _plain_text(chain)
     sentence_count = sum(isinstance(comp, Plain) for comp in chain)
@@ -226,7 +361,7 @@ def to_nodes(
     groups: list[list[BaseMessageComponent]],
     nickname: str,
 ) -> list[Nodes]:
-    """Wrap each text segment into its own forward node.
+    """Wrap each segment into its own forward node.
 
     Args:
         groups: Segment groups. One group becomes one message inside the
@@ -234,14 +369,19 @@ def to_nodes(
         nickname: Display name used for every node.
 
     Returns:
-        A single ``Nodes`` component. The sender id is ``0`` so QQ keeps the
-        custom nickname instead of replacing it with the bot's group card.
+        A single ``Nodes`` component. Text, images, files, audio, video,
+        emoji, and mentions are kept in order. The sender id is ``0`` so QQ
+        keeps the custom nickname instead of the bot's group card.
     """
     nodes: list[Node] = []
     for group in groups:
-        content = [
-            comp for comp in group if isinstance(comp, Plain) and comp.text.strip()
-        ]
+        content: list[BaseMessageComponent] = []
+        for comp in group:
+            if isinstance(comp, Plain):
+                if comp.text.strip():
+                    content.append(comp)
+            elif isinstance(comp, _FORWARD_CONTENT):
+                content.append(comp)
         if content:
             nodes.append(Node(name=nickname, uin="0", content=content))
     if not nodes:

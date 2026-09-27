@@ -54,7 +54,7 @@
       "sentences_threshold": {
         "type": "int",
         "description": "分段阈值句数",
-        "hint": "拆分后的句数超过该值时不分段。",
+        "hint": "自动切分或 {{SEG}} 拆分后的句数超过该值时，整条不分段。",
         "default": 8
       },
       "split_chars": {
@@ -100,6 +100,17 @@
         "hint": "每秒字符数。每段发送前按该速度计算等待时间，数值越大发送越快。",
         "default": 8.0
       },
+      "trim_head_chars": {
+        "type": "list",
+        "description": "清理句首字符",
+        "hint": "分段后从每段开头移除这些字符。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "\n"
+        ]
+      },
       "trim_chars": {
         "type": "list",
         "description": "清理句尾字符",
@@ -117,7 +128,8 @@
           ",",
           ".",
           ";",
-          " "
+          " ",
+          "\n"
         ]
       }
     }
@@ -178,7 +190,7 @@
       "sentences_threshold": {
         "type": "int",
         "description": "句数阈值",
-        "hint": "分段后的消息条数超过该值时改为合并转发，每个分段成为转发里的一条消息。",
+        "hint": "分段条数超过该值时改为合并转发，每个分段成为转发里的一条消息。条数超过分段句数上限、因此不再逐条发送时，这条规则仍然生效。",
         "default": 10
       },
       "default_nickname": {

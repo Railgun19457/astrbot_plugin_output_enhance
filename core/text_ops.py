@@ -74,29 +74,46 @@ def split_sentences(text: str, config: PluginConfig) -> list[str]:
     for match in pattern.finditer(text):
         if _inside(match.start(), protected):
             continue
-        piece = _trim_tail(text[start : match.end()], config.seg_trim_chars)
+        piece = trim_segment(text[start : match.end()], [], config.seg_trim_chars)
         if piece:
             pieces.append(piece)
         start = match.end()
-    tail = _trim_tail(text[start:], config.seg_trim_chars)
+    tail = trim_segment(text[start:], [], config.seg_trim_chars)
     if tail:
         pieces.append(tail)
     return pieces or ([text] if text else [])
 
 
-def _trim_tail(text: str, chars: list[str]) -> str:
-    """Strip configured trailing characters, longest match first."""
-    trimmed = text.strip()
+def trim_segment(text: str, head: list[str], tail: list[str]) -> str:
+    """Remove configured characters from both ends of one segment.
+
+    Args:
+        text: Segment text.
+        head: Characters removed from the start, longest match first.
+        tail: Characters removed from the end, longest match first.
+
+    Returns:
+        Text with those edge characters removed. Interior text is unchanged.
+    """
+    return _trim_edge(_trim_edge(text, head, from_tail=False), tail, from_tail=True)
+
+
+def _trim_edge(text: str, chars: list[str], *, from_tail: bool) -> str:
+    """Strip one edge, longest configured match first."""
     ordered = sorted((item for item in chars if item), key=len, reverse=True)
     changed = True
-    while changed and trimmed:
+    while changed and text:
         changed = False
         for item in ordered:
-            if trimmed.endswith(item):
-                trimmed = trimmed[: -len(item)].rstrip()
+            if from_tail and text.endswith(item):
+                text = text[: -len(item)]
                 changed = True
                 break
-    return trimmed
+            if not from_tail and text.startswith(item):
+                text = text[len(item) :]
+                changed = True
+                break
+    return text.strip() if not chars else text
 
 
 def typing_delay(text: str, speed: float) -> float:
