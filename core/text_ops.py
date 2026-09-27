@@ -58,7 +58,8 @@ def split_sentences(text: str, config: PluginConfig) -> list[str]:
 
     Args:
         text: Text to split.
-        config: Split characters, protected pair symbols, and tail trim list.
+        config: Split characters, protected pair symbols, and the head and
+            tail trim lists applied to every piece.
 
     Returns:
         Non-empty sentence pieces. The original text is returned when no
@@ -74,18 +75,22 @@ def split_sentences(text: str, config: PluginConfig) -> list[str]:
     for match in pattern.finditer(text):
         if _inside(match.start(), protected):
             continue
-        piece = trim_segment(text[start : match.end()], [], config.seg_trim_chars)
+        piece = trim_segment(
+            text[start : match.end()],
+            config.seg_trim_head_chars,
+            config.seg_trim_chars,
+        )
         if piece:
             pieces.append(piece)
         start = match.end()
-    tail = trim_segment(text[start:], [], config.seg_trim_chars)
+    tail = trim_segment(text[start:], config.seg_trim_head_chars, config.seg_trim_chars)
     if tail:
         pieces.append(tail)
     return pieces or ([text] if text else [])
 
 
 def trim_segment(text: str, head: list[str], tail: list[str]) -> str:
-    """Remove configured characters from both ends of one segment.
+    """Remove surrounding whitespace and configured characters from a segment.
 
     Args:
         text: Segment text.
@@ -93,17 +98,23 @@ def trim_segment(text: str, head: list[str], tail: list[str]) -> str:
         tail: Characters removed from the end, longest match first.
 
     Returns:
-        Text with those edge characters removed. Interior text is unchanged.
+        Text with surrounding whitespace and those edge characters removed.
+        Interior text is unchanged.
     """
     return _trim_edge(_trim_edge(text, head, from_tail=False), tail, from_tail=True)
 
 
 def _trim_edge(text: str, chars: list[str], *, from_tail: bool) -> str:
-    """Strip one edge, longest configured match first."""
+    """Remove surrounding whitespace and one edge worth of configured chars.
+
+    Whitespace is dropped before every match so an entry such as ``- `` still
+    matches when the segment edge is preceded by a space.
+    """
     ordered = sorted((item for item in chars if item), key=len, reverse=True)
     changed = True
     while changed and text:
         changed = False
+        text = text.strip()
         for item in ordered:
             if from_tail and text.endswith(item):
                 text = text[: -len(item)]
@@ -113,7 +124,7 @@ def _trim_edge(text: str, chars: list[str], *, from_tail: bool) -> str:
                 text = text[len(item) :]
                 changed = True
                 break
-    return text.strip() if not chars else text
+    return text.strip()
 
 
 def typing_delay(text: str, speed: float) -> float:

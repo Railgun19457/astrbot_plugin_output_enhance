@@ -30,7 +30,7 @@
       "prompt": {
         "type": "text",
         "description": "自定义注入内容",
-        "hint": "留空时按已开启的功能自动拼装。填写后原样注入，不再随功能开关裁剪。",
+        "hint": "留空时按已开启的功能自动拼装。填写后整段注入，不再随功能开关裁剪。",
         "default": ""
       }
     }
@@ -60,7 +60,7 @@
       "split_chars": {
         "type": "list",
         "description": "分段字符",
-        "hint": "在这些字符处切分，支持填写正则表达式。",
+        "hint": "在这些字符处切分。填写 \\n 表示换行。",
         "items": {
           "type": "string"
         },
@@ -70,13 +70,13 @@
           "！",
           "……",
           "~",
-          "\n"
+          "\\n"
         ]
       },
       "pair_symbols": {
         "type": "list",
         "description": "成对符号",
-        "hint": "填写形如 （） 的成对符号，位于其中的内容不触发分段。",
+        "hint": "填写形如 （） 的成对符号，位于其中的内容不触发分段。只使用首尾两个字符配对。",
         "items": {
           "type": "string"
         },
@@ -98,39 +98,33 @@
       "typing_speed": {
         "type": "float",
         "description": "打字速度",
-        "hint": "每秒字符数。每段发送前按该速度计算等待时间，数值越大发送越快。",
+        "hint": "每秒字符数。每段发送前按该速度计算等待时间，数值越大发送越快，单段最长等待 8 秒。",
         "default": 30.0
       },
       "trim_head_chars": {
         "type": "list",
         "description": "清理句首字符",
-        "hint": "分段后从每段开头移除这些字符。",
+        "hint": "分段后从每段开头移除这些字符，自动切分和 {{SEG}} 分段都生效。每段首尾的空白字符会自动移除。",
         "items": {
           "type": "string"
         },
-        "default": [
-          "\n"
-        ]
+        "default": []
       },
       "trim_chars": {
         "type": "list",
         "description": "清理句尾字符",
-        "hint": "分段后从每段末尾移除这些字符。",
+        "hint": "分段后从每段末尾移除这些字符，自动切分和 {{SEG}} 分段都生效。每段首尾的空白字符会自动移除。",
         "items": {
           "type": "string"
         },
         "default": [
           "。",
-          "！",
-          "？",
           "，",
           "；",
           "、",
           ",",
           ".",
-          ";",
-          " ",
-          "\n"
+          ";"
         ]
       }
     }
@@ -138,7 +132,7 @@
   "quote_reply": {
     "type": "object",
     "description": "引用回复",
-    "hint": "支持模型用标记引用消息，也支持按间隔自动引用。",
+    "hint": "支持模型用标记引用消息，也支持按间隔自动引用。使用前请关闭 AstrBot 平台设置里的回复引用。",
     "items": {
       "enable": {
         "type": "bool",
@@ -157,7 +151,7 @@
   "at_parse": {
     "type": "object",
     "description": "@ 解析",
-    "hint": "解析模型输出的 @ 标记为真正的 At 消息段。",
+    "hint": "解析模型输出的 @ 标记为真正的 At 消息段。仅支持的平台生效，其他平台上标记会被移除。",
     "items": {
       "enable": {
         "type": "bool",
@@ -221,7 +215,7 @@
       "renderer": {
         "type": "string",
         "description": "渲染器",
-        "hint": "Pillow 在本地渲染，轻量快速，可自定义字体，不支持数学公式。AstrBot T2I 使用框架渲染服务，可渲染 Markdown 和公式，速度较慢；模板样式在 AstrBot 的文转图配置里设置。",
+        "hint": "Pillow 在本地渲染，支持常见 Markdown，可自定义字体，不支持数学公式。AstrBot T2I 使用框架渲染服务，可渲染 Markdown 和公式，速度较慢；模板样式在 AstrBot 的文转图配置里设置。",
         "options": [
           "pillow",
           "astrbot_t2i"
@@ -235,7 +229,7 @@
       "pillow_template": {
         "type": "string",
         "description": "Pillow 模板",
-        "hint": "仅在渲染器选择 Pillow 时生效。留空使用插件自带的亮色模板 templates/light.json，暗色模板是 templates/dark.json。也可以填写自己的 JSON 模板绝对路径。",
+        "hint": "仅在渲染器选择 Pillow 时生效。留空使用插件自带的亮色模板 templates/light.json，暗色模板是 templates/dark.json。也可以填写自己的 JSON 模板路径，相对路径以插件目录为基准，也可用绝对路径。",
         "default": "templates/light.json"
       },
       "font_path": {
@@ -346,7 +340,7 @@
       "pair_symbols": {
         "type": "list",
         "description": "清除成对符号内内容",
-        "hint": "填写形如 [text] 的成对符号，表示清除该符号包裹的内容。text 只是占位符，本身不参与匹配。",
+        "hint": "填写形如 [text] 的成对符号，表示清除该符号包裹的内容。text 只是占位符，本身不参与匹配；不含 text 的条目不生效。",
         "items": {
           "type": "string"
         },

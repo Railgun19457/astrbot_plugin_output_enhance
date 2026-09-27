@@ -237,11 +237,11 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
         llm_tool_options=tool_options,
         prompt_enable=_as_bool(prompt.get("enable"), True),
         prompt_custom=str(prompt.get("prompt") or ""),
-        seg_enable=_as_bool(segmented.get("enable"), False),
+        seg_enable=_as_bool(segmented.get("enable"), True),
         seg_words_threshold=_as_int(segmented.get("words_threshold"), 150, 1),
         seg_sentences_threshold=_as_int(segmented.get("sentences_threshold"), 8, 1),
         seg_split_chars=_as_str_list(
-            segmented.get("split_chars"), ["。", "？", "！", "……", "~"]
+            segmented.get("split_chars"), ["。", "？", "！", "……", "~", "\\n"]
         ),
         seg_pair_symbols=_as_str_list(
             segmented.get("pair_symbols"),
@@ -260,18 +260,18 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
                 "‘’",
             ],
         ),
-        seg_typing_speed=_as_float(segmented.get("typing_speed"), 8.0),
-        seg_trim_head_chars=_as_str_list(segmented.get("trim_head_chars"), ["\\n"]),
+        seg_typing_speed=_as_float(segmented.get("typing_speed"), 30.0),
+        seg_trim_head_chars=_as_str_list(segmented.get("trim_head_chars"), []),
         seg_trim_chars=_as_str_list(
             segmented.get("trim_chars"),
-            ["。", "！", "？", "，", "；", "、", ",", ".", ";", " ", "\\n"],
+            ["。", "，", "；", "、", ",", ".", ";"],
         ),
         quote_enable=_as_bool(quote.get("enable"), True),
-        auto_quote_interval=_as_int(quote.get("auto_quote_interval"), 0),
+        auto_quote_interval=_as_int(quote.get("auto_quote_interval"), 2),
         at_enable=_as_bool(at_parse.get("enable"), True),
         allow_at_all=_as_bool(at_parse.get("allow_at_all"), False),
-        forward_enable=_as_bool(forward.get("enable"), False),
-        forward_text_threshold=_as_int(forward.get("text_threshold"), 500, 1),
+        forward_enable=_as_bool(forward.get("enable"), True),
+        forward_text_threshold=_as_int(forward.get("text_threshold"), 300, 1),
         forward_sentences_threshold=_as_int(forward.get("sentences_threshold"), 10, 1),
         default_nickname=str(forward.get("default_nickname") or "AstrBot"),
         t2i_enable=_as_bool(text_to_image.get("enable"), False),
@@ -281,7 +281,9 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
             if text_to_image.get("renderer") == "astrbot_t2i"
             else "pillow"
         ),
-        pillow_template=str(text_to_image.get("pillow_template") or ""),
+        pillow_template=str(
+            text_to_image.get("pillow_template") or "templates/light.json"
+        ),
         font_path=str(
             text_to_image.get("font_path")
             or "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
