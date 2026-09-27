@@ -15,6 +15,9 @@ from astrbot.core import html_renderer
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.io import download_file
 from PIL import Image, ImageDraw, ImageFont
+from pygments.lexers import get_lexer_by_name
+from pygments.token import Token
+from pygments.util import ClassNotFound
 
 from .config import PluginConfig
 
@@ -291,6 +294,7 @@ class _Run(NamedTuple):
     italic: bool = False
     strike: bool = False
     code: bool = False
+    color: str = ""
 
 
 class _Block(NamedTuple):
@@ -299,6 +303,9 @@ class _Block(NamedTuple):
     kind: str
     lines: tuple[tuple[_Run, ...], ...]
     indent: int = 0
+    language: str = ""
+    rows: tuple[tuple[str, ...], ...] = ()
+    marker: str = ""
 
 
 class _LaidBlock(NamedTuple):
@@ -308,6 +315,9 @@ class _LaidBlock(NamedTuple):
     lines: tuple[tuple[_Run, ...], ...]
     height: int
     indent: int = 0
+    language: str = ""
+    rows: tuple[tuple[str, ...], ...] = ()
+    marker: str = ""
 
 
 class _Fonts(NamedTuple):
@@ -318,10 +328,11 @@ class _Fonts(NamedTuple):
     italic: ImageFont.ImageFont
     code: ImageFont.ImageFont
     emoji: ImageFont.ImageFont | None
+    heading: dict[str, ImageFont.ImageFont]
 
 
 def _font_set(font_path: str, emoji_path: str, size: int) -> _Fonts:
-    """Load the body fonts and the color emoji font.
+    """Load the body, heading, emphasis, and color emoji fonts.
 
     Args:
         font_path: Preferred CJK body font.
@@ -332,15 +343,52 @@ def _font_set(font_path: str, emoji_path: str, size: int) -> _Fonts:
         Fonts used while measuring and painting Markdown.
     """
     regular = _load_font(font_path, size)
-    bold = _load_font(font_path, size, index=1) or regular
-    italic = _load_font(font_path, size, index=2) or regular
-    code = _load_font("CascadiaMono.ttf", size, required=False) or _load_font(
-        "consola.ttf",
-        size,
-        required=False,
+    bold = _styled_font(font_path, size, "Bold")
+    italic = _styled_font(font_path, size, "Italic")
+    code = _monospace_font(int(size * 0.9))
+    heading = {
+        "h1": _styled_font(font_path, int(size * 1.65), "Bold"),
+        "h2": _styled_font(font_path, int(size * 1.35), "Bold"),
+        "h3": _styled_font(font_path, int(size * 1.15), "Bold"),
+    }
+    return _Fonts(
+        regular, bold, italic, code or regular, _load_emoji(emoji_path), heading
     )
-    emoji = _load_emoji(emoji_path)
-    return _Fonts(regular, bold, italic, code or regular, emoji)
+
+
+def _monospace_font(size: int) -> ImageFont.ImageFont | None:
+    """Load the first installed monospace face.
+
+    Args:
+        size: Code font size.
+
+    Returns:
+        A monospace font, or None when none of the known faces exist.
+    """
+    for name in ("CascadiaMono.ttf", "consola.ttf", "UbuntuMono-Regular.ttf"):
+        loaded = _load_font(name, size, required=False)
+        if loaded is not None and loaded.getlength("i") == loaded.getlength("M"):
+            return loaded
+    return None
+
+
+def _styled_font(font_path: str, size: int, style: str) -> ImageFont.ImageFont:
+    """Load a named font style, then synthesize it from the regular font.
+
+    Args:
+        font_path: Preferred font path or family name.
+        size: Requested pixel size.
+        style: ``Bold`` or ``Italic``.
+
+    Returns:
+        The styled font. A missing style falls back to the regular font.
+    """
+    family = Path(font_path).stem or font_path
+    for candidate in (f"{family}-{style}", f"{family}{style}", font_path):
+        loaded = _load_font(candidate, size, required=False)
+        if loaded is not None:
+            return loaded
+    return _load_font(font_path, size)
 
 
 def _load_emoji(font_path: str) -> ImageFont.ImageFont | None:
@@ -378,13 +426,18 @@ def _markdown_blocks(text: str) -> list[_Block]:
         stripped = lines[index].strip()
         if stripped.startswith("```"):
             flush()
+            language = stripped[3:].strip()
             code: list[str] = []
             index += 1
             while index < len(lines) and not lines[index].strip().startswith("```"):
                 code.append(lines[index])
                 index += 1
             blocks.append(
-                _Block("code", tuple((_Run(line, code=True),) for line in code))
+                _Block(
+                    "code",
+                    tuple((_Run(line, code=True),) for line in code),
+                    language=language,
+                )
             )
             index += 1
             continue
@@ -395,7 +448,7 @@ def _markdown_blocks(text: str) -> list[_Block]:
                 if not _is_table_separator(lines[index]):
                     rows.append(_table_cells(lines[index]))
                 index += 1
-            blocks.append(_Block("table", tuple(rows)))
+            blocks.append(_Block("table", tuple(rows), rows=tuple(rows)))
             continue
         if not stripped:
             flush()
@@ -424,6 +477,7 @@ def _markdown_blocks(text: str) -> list[_Block]:
                     "ordered",
                     (_inline(ordered.group(3)),),
                     len(ordered.group(1)),
+                    marker=f"{ordered.group(2)}. ",
                 )
             )
         else:
@@ -474,9 +528,8 @@ def _table_at(lines: list[str], index: int) -> bool:
     )
 
 
-def _table_cells(line: str) -> tuple[_Run, ...]:
-    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-    return tuple(_Run(cell) for cell in cells)
+def _table_cells(line: str) -> tuple[str, ...]:
+    return tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
 
 
 def _layout_block(
@@ -485,24 +538,51 @@ def _layout_block(
     template: PillowTemplate,
     width: int,
 ) -> _LaidBlock:
-    """Wrap one Markdown block and measure its rendered height."""
-    line_height = max(int(template.font_size * template.line_height), 1)
+    """Wrap one Markdown block and measure its rendered height.
+
+    Args:
+        block: Parsed Markdown block.
+        fonts: Fonts used to measure wrapped lines.
+        template: Spacing and font size.
+        width: Content width available inside the page margins.
+
+    Returns:
+        The wrapped block and the vertical space it occupies.
+    """
+    base = fonts.heading.get(block.kind, fonts.regular)
+    step = _text_height(base, template)
     if block.kind == "code":
         lines = tuple(
-            _wrap_runs(line, fonts, width - template.font_size) for line in block.lines
+            _wrap_runs(line, fonts, width - template.font_size, fonts.code)
+            for line in block.lines
         )
-        flat = tuple(line for group in lines for line in group)
-        return _LaidBlock(block.kind, flat, line_height * (len(flat) + 1))
-    if block.kind == "table":
+        flat = tuple(line for group in lines for line in group) or ((_Run(""),),)
         return _LaidBlock(
             block.kind,
-            block.lines,
-            line_height * (len(block.lines) + 1),
+            flat,
+            step * (len(flat) + 1),
+            language=block.language,
         )
-    indent = template.font_size * 2 if block.kind in {"bullet", "ordered"} else 0
-    wrapped = _wrap_runs(block.lines[0], fonts, width - indent)
-    gap = line_height if block.kind.startswith("h") else line_height // 2
-    return _LaidBlock(block.kind, wrapped, line_height * len(wrapped) + gap, indent)
+    if block.kind == "table":
+        columns = max((len(row) for row in block.rows), default=1)
+        return _LaidBlock(
+            block.kind,
+            (),
+            step * (len(block.rows) + 1),
+            rows=tuple(row + ("",) * (columns - len(row)) for row in block.rows),
+        )
+    marker = "• " if block.kind == "bullet" else block.marker
+    prefix = int(base.getlength(marker)) + 12 if marker else 0
+    quote = template.font_size if block.kind == "quote" else 0
+    wrapped = _wrap_runs(block.lines[0], fonts, max(width - prefix - quote, 1), base)
+    gap = step // 2 if block.kind.startswith("h") else step // 3
+    return _LaidBlock(
+        block.kind,
+        wrapped,
+        step * len(wrapped) + gap,
+        prefix + quote,
+        marker=marker,
+    )
 
 
 def _paint_block(
@@ -512,39 +592,165 @@ def _paint_block(
     template: PillowTemplate,
     y: int,
 ) -> None:
-    """Paint one wrapped Markdown block."""
-    x = template.margin + block.indent
-    line_height = max(int(template.font_size * template.line_height), 1)
+    """Paint one wrapped Markdown block.
+
+    Args:
+        draw: Pillow drawing context of the page.
+        block: Wrapped block produced by ``_layout_block``.
+        fonts: Body, emphasis, and emoji fonts.
+        template: Colors and margins.
+        y: Top of the block.
+    """
+    base = fonts.heading.get(block.kind, fonts.regular)
+    step = _text_height(base, template)
+    pad = max(template.font_size // 3, 8)
     if block.kind == "code":
         draw.rounded_rectangle(
             (
                 template.margin,
                 y,
                 template.width - template.margin,
-                y + block.height - line_height // 2,
+                y + block.height - step // 3,
+            ),
+            radius=14,
+            fill=template.code_background,
+        )
+        line_y = y + pad // 2
+        for line in _highlight(block.lines, block.language):
+            _paint_runs(
+                draw,
+                (template.margin + pad, line_y),
+                line,
+                fonts,
+                template,
+                fonts.code,
+            )
+            line_y += step
+        return
+    if block.kind == "table":
+        _paint_table(draw, block, fonts, template, y, step)
+        return
+    x = template.margin + block.indent
+    if block.kind == "quote":
+        draw.rounded_rectangle(
+            (
+                template.margin,
+                y,
+                template.width - template.margin,
+                y + block.height - step // 3,
             ),
             radius=12,
             fill=template.code_background,
         )
-    if block.kind == "quote":
         draw.rectangle(
-            (template.margin, y, template.margin + 4, y + line_height),
-            fill=template.quote,
+            (template.margin, y, template.margin + 6, y + block.height - step // 3),
+            fill=template.muted,
         )
-        x += template.font_size
     for index, line in enumerate(block.lines):
-        prefix = ""
-        if block.kind == "bullet" and index == 0:
-            prefix = "• "
-        elif block.kind == "ordered" and index == 0:
-            prefix = "1. "
+        prefix = block.marker if index == 0 else ""
         _paint_runs(
             draw,
-            (x, y + index * line_height),
-            ((_Run(prefix),) if prefix else ()) + line,
+            (x - (int(base.getlength(prefix)) + 12 if prefix else 0), y + index * step),
+            ((_Run(prefix, bold=True),) if prefix else ()) + line,
             fonts,
             template,
+            base,
         )
+
+
+def _highlight(
+    lines: tuple[tuple[_Run, ...], ...],
+    language: str,
+) -> tuple[tuple[_Run, ...], ...]:
+    """Color one fenced code block when its language is known.
+
+    Args:
+        lines: Wrapped source lines.
+        language: Fence language. An unknown name stays uncolored.
+
+    Returns:
+        One run sequence per source line.
+    """
+    source = "\n".join("".join(run.text for run in line) for line in lines)
+    if not language:
+        return tuple((_Run(line, code=True),) for line in source.split("\n"))
+    colors = {
+        Token.Keyword: "#7C3AED",
+        Token.Name.Function: "#0369A1",
+        Token.Name.Class: "#B45309",
+        Token.String: "#047857",
+        Token.Number: "#B45309",
+        Token.Comment: "#6B7280",
+        Token.Operator: "#BE123C",
+        Token.Punctuation: "#6B7280",
+    }
+    try:
+        tokens = get_lexer_by_name(language).get_tokens(source)
+    except ClassNotFound:
+        return tuple((_Run(line, code=True),) for line in source.split("\n"))
+    painted: list[list[_Run]] = [[]]
+    for kind, text in tokens:
+        color = ""
+        probe = kind
+        while probe is not Token:
+            color = colors.get(probe, color)
+            probe = probe.parent
+        parts = text.split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                painted[-1].append(_Run(part, code=True, color=color))
+            if index < len(parts) - 1:
+                painted.append([])
+    return tuple(tuple(line) or (_Run("", code=True),) for line in painted)
+
+
+def _paint_table(
+    draw: ImageDraw.ImageDraw,
+    block: _LaidBlock,
+    fonts: _Fonts,
+    template: PillowTemplate,
+    y: int,
+    step: int,
+) -> None:
+    """Paint a bordered table with a shaded header row.
+
+    Args:
+        draw: Pillow drawing context of the page.
+        block: Table block. ``rows`` holds the cell text.
+        fonts: Body font used inside cells.
+        template: Border and header colors.
+        y: Top of the table.
+        step: One row height.
+    """
+    columns = max((len(row) for row in block.rows), default=1)
+    left = template.margin
+    width = template.width - template.margin * 2
+    column_width = width // columns
+    bottom = y + step * len(block.rows)
+    for index, row in enumerate(block.rows):
+        top = y + index * step
+        if index == 0:
+            draw.rectangle(
+                (left, top, left + width, top + step), fill=template.code_background
+            )
+        for column, cell in enumerate(row):
+            cell_left = left + column * column_width
+            draw.rectangle(
+                (cell_left, top, cell_left + column_width, top + step),
+                outline=template.quote,
+                width=1,
+            )
+            font = fonts.bold if index == 0 else fonts.regular
+            visible = cell
+            while len(visible) > 1 and font.getlength(visible) > column_width - 20:
+                visible = visible[:-1]
+            draw.text(
+                (cell_left + 10, top + max((step - template.font_size) // 2, 4)),
+                visible,
+                font=font,
+                fill=template.foreground,
+            )
+    draw.rectangle((left, y, left + width, bottom), outline=template.quote, width=2)
 
 
 def _paint_runs(
@@ -553,13 +759,25 @@ def _paint_runs(
     runs: tuple[_Run, ...],
     fonts: _Fonts,
     template: PillowTemplate,
+    base_font: ImageFont.ImageFont | None = None,
 ) -> None:
-    """Paint styled runs and scaled color emoji."""
+    """Paint styled runs, inline-code chips, and scaled color emoji.
+
+    Args:
+        draw: Pillow drawing context of the page.
+        origin: Top-left of the first run.
+        runs: Styled pieces. Newlines start a new visual line.
+        fonts: Body, emphasis, code, and emoji fonts.
+        template: Colors and font size.
+        base_font: Font used by plain runs. Headings pass their larger font.
+    """
     x, y = origin
+    base = base_font or fonts.regular
+    body = base.getbbox("国")
+    body_height = max(body[3] - body[1], template.font_size)
     for run in runs:
         for kind, piece in _runs(run.text):
             if kind == "emoji" and fonts.emoji is not None:
-                target = template.font_size
                 glyph = Image.new("RGBA", (_EMOJI_BITMAP_SIZE * 2, _EMOJI_BITMAP_SIZE))
                 ImageDraw.Draw(glyph).text(
                     (0, 0),
@@ -570,74 +788,184 @@ def _paint_runs(
                 box = glyph.getbbox()
                 if box:
                     glyph = glyph.crop(box)
-                    glyph.thumbnail((target, target), Image.Resampling.LANCZOS)
+                    glyph.thumbnail(
+                        (body_height, body_height), Image.Resampling.LANCZOS
+                    )
                     image = getattr(draw, "_image", None)
                     if isinstance(image, Image.Image):
-                        image.alpha_composite(
-                            glyph,
-                            (x, y + max((target - glyph.height) // 2, 0)),
-                        )
-                    x += glyph.width
+                        image.alpha_composite(glyph, (x, y + body[1]))
+                    x += glyph.width + 4
                 continue
-            font = _run_font(run, fonts)
-            fill = template.muted if run.code else template.foreground
-            draw.text((x, y), piece, font=font, fill=fill)
+            font = _run_font(run, fonts, base)
+            fill = (
+                _color(run.color, template.foreground)
+                if run.color
+                else template.foreground
+            )
+            drawn = int(font.getlength(piece))
+            inline = run.code and base is not fonts.code
+            if inline:
+                pad = max(template.font_size // 6, 4)
+                box = font.getbbox(piece or " ")
+                draw.rounded_rectangle(
+                    (
+                        x - pad,
+                        y + box[1] - pad // 2,
+                        x + drawn + pad,
+                        y + box[3] + pad // 2,
+                    ),
+                    radius=6,
+                    fill=template.code_background,
+                )
+            if run.italic and not run.code:
+                _paint_oblique(draw, (x, y), piece, font, fill, run.bold)
+            else:
+                draw.text(
+                    (x, y),
+                    piece,
+                    font=font,
+                    fill=fill,
+                    stroke_width=1 if run.bold else 0,
+                    stroke_fill=fill,
+                )
             if run.strike:
-                middle = y + template.font_size // 2
-                draw.line((x, middle, x + font.getlength(piece), middle), fill=fill)
-            x += int(font.getlength(piece))
+                box = font.getbbox(piece or " ")
+                middle = y + (box[1] + box[3]) // 2
+                draw.line(
+                    (x, middle, x + drawn, middle),
+                    fill=fill,
+                    width=max(template.font_size // 16, 2),
+                )
+            inline = run.code and base_font is not fonts.code
+            x += drawn + (max(template.font_size // 6, 4) * 2 if inline else 0)
 
 
-def _run_font(run: _Run, fonts: _Fonts) -> ImageFont.ImageFont:
+def _paint_oblique(
+    draw: ImageDraw.ImageDraw,
+    origin: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+    bold: bool,
+) -> None:
+    """Skew a missing italic face so CJK emphasis stays visible.
+
+    Args:
+        draw: Pillow drawing context of the page.
+        origin: Top-left of the unskewed text.
+        text: Characters to draw.
+        font: Regular or bold font already selected for the run.
+        fill: Text color.
+        bold: Whether the skewed text also gets a one-pixel stroke.
+    """
+    image = getattr(draw, "_image", None)
+    if not isinstance(image, Image.Image):
+        return
+    size = max(getattr(font, "size", 32), 1)
+    cursor = 0
+    for char in text:
+        glyph_width = max(int(font.getlength(char)), 1)
+        layer = Image.new("RGBA", (glyph_width + size, size * 2))
+        ImageDraw.Draw(layer).text(
+            (size // 4, 0),
+            char,
+            font=font,
+            fill=(*fill, 255),
+            stroke_width=1 if bold else 0,
+            stroke_fill=(*fill, 255),
+        )
+        skewed = layer.transform(
+            layer.size,
+            Image.Transform.AFFINE,
+            (1, 0.42, -size // 5, 0, 1, 0),
+            Image.Resampling.BICUBIC,
+        )
+        image.alpha_composite(skewed, (origin[0] + cursor - size // 4, origin[1]))
+        cursor += glyph_width
+
+
+def _run_font(
+    run: _Run,
+    fonts: _Fonts,
+    base_font: ImageFont.ImageFont | None = None,
+) -> ImageFont.ImageFont:
+    """Select the face for one run.
+
+    Args:
+        run: Styled piece of text.
+        fonts: Loaded body, code, and emphasis fonts.
+        base_font: Font used when the run has no extra emphasis.
+
+    Returns:
+        The font Pillow should measure and draw.
+    """
     if run.code:
         return fonts.code
-    if run.bold:
+    if run.bold and base_font in {None, fonts.regular}:
         return fonts.bold
-    if run.italic:
-        return fonts.italic
-    return fonts.regular
+    return base_font or fonts.regular
+
+
+def _text_height(font: ImageFont.ImageFont, template: PillowTemplate) -> int:
+    """Return the line step for a font, including the template leading.
+
+    Args:
+        font: Font that will draw the line.
+        template: Line-height multiplier.
+
+    Returns:
+        Pixels from one baseline row to the next.
+    """
+    box = font.getbbox("国Ag")
+    return max(int((box[3] - box[1]) * template.line_height), 1)
 
 
 def _wrap_runs(
     runs: tuple[_Run, ...],
     fonts: _Fonts,
     width: int,
+    base_font: ImageFont.ImageFont | None = None,
 ) -> tuple[tuple[_Run, ...], ...]:
-    """Wrap styled runs without drawing their Markdown markers."""
+    """Wrap styled runs without drawing their Markdown markers.
+
+    Args:
+        runs: Inline pieces of one source line.
+        fonts: Fonts used to measure each piece.
+        width: Maximum line width in pixels.
+        base_font: Font used by plain runs.
+
+    Returns:
+        Wrapped lines. Empty input becomes one empty line.
+    """
     lines: list[list[_Run]] = [[]]
     used = 0
     for run in runs:
         pending = run
         while pending.text:
-            font = _run_font(pending, fonts)
+            font = _run_font(pending, fonts, base_font)
             taken = ""
             taken_width = 0
+            inline = pending.code and base_font is not fonts.code
+            pad = max(getattr(font, "size", 32) // 6, 4) * 2 if inline else 0
             for char in pending.text:
-                active = (
-                    fonts.emoji if _EMOJI_RE.fullmatch(char) and fonts.emoji else font
-                )
+                emoji = bool(_EMOJI_RE.fullmatch(char) and fonts.emoji)
                 char_width = (
-                    int(active.getlength(char)) if active is font else font.size
+                    getattr(font, "size", 32) if emoji else int(font.getlength(char))
                 )
-                if taken and used + taken_width + char_width > width:
+                if taken and not inline and used + taken_width + char_width > width:
                     break
                 taken += char
                 taken_width += char_width
-            lines[-1].append(
-                _Run(taken, pending.bold, pending.italic, pending.strike, pending.code)
-            )
+            if inline and lines[-1] and used + taken_width + pad > width:
+                lines.append([])
+                used = 0
+            lines[-1].append(pending._replace(text=taken))
             used += taken_width
-            pending = _Run(
-                pending.text[len(taken) :],
-                pending.bold,
-                pending.italic,
-                pending.strike,
-                pending.code,
-            )
+            pending = pending._replace(text=pending.text[len(taken) :])
             if pending.text:
                 lines.append([])
                 used = 0
-    return tuple(tuple(line) for line in lines if line)
+    return tuple(tuple(line) for line in lines if line) or ((_Run(""),),)
 
 
 def _load_font(
@@ -650,8 +978,9 @@ def _load_font(
     """Load a font file, falling back to a CJK system font when required.
 
     Args:
-        font_path: Local font path.
+        font_path: Local font path or family name.
         size: Font size requested by the template.
+        index: Face index inside a font collection.
         required: Whether a system font and Pillow's default may be used.
 
     Returns:
@@ -682,10 +1011,18 @@ def _runs(text: str) -> list[tuple[str, str]]:
         cursor = match.end()
     if cursor < len(text):
         runs.append(("text", text[cursor:]))
-    return runs
+    return runs or [("text", text)]
 
 
 def _pages(text: str) -> list[str]:
+    """Split long framework-renderer text near paragraph breaks.
+
+    Args:
+        text: Source text rendered by AstrBot T2I.
+
+    Returns:
+        Pages no longer than the character limit.
+    """
     if len(text) <= _PAGE_CHAR_LIMIT:
         return [text]
     pages: list[str] = []
