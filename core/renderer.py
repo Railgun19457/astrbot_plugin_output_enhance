@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse
@@ -324,6 +325,7 @@ class _LaidBlock(NamedTuple):
     language: str = ""
     rows: tuple[tuple[str, ...], ...] = ()
     marker: str = ""
+    marker_width: int = 0
 
 
 class _Fonts(NamedTuple):
@@ -331,7 +333,6 @@ class _Fonts(NamedTuple):
 
     regular: ImageFont.ImageFont
     bold: ImageFont.ImageFont
-    italic: ImageFont.ImageFont
     code: ImageFont.ImageFont
     emoji: ImageFont.ImageFont | None
     heading: dict[str, ImageFont.ImageFont]
@@ -350,16 +351,13 @@ def _font_set(font_path: str, emoji_path: str, size: int) -> _Fonts:
     """
     regular = _load_font(font_path, size)
     bold = _styled_font(font_path, size, "Bold")
-    italic = _styled_font(font_path, size, "Italic")
     code = _monospace_font(int(size * 0.9))
     heading = {
         "h1": _styled_font(font_path, int(size * 1.65), "Bold"),
         "h2": _styled_font(font_path, int(size * 1.35), "Bold"),
         "h3": _styled_font(font_path, int(size * 1.15), "Bold"),
     }
-    return _Fonts(
-        regular, bold, italic, code or regular, _load_emoji(emoji_path), heading
-    )
+    return _Fonts(regular, bold, code or regular, _load_emoji(emoji_path), heading)
 
 
 def _monospace_font(size: int) -> ImageFont.ImageFont | None:
@@ -571,14 +569,19 @@ def _layout_block(
         )
     if block.kind == "table":
         columns = max((len(row) for row in block.rows), default=1)
+        header_box = fonts.bold.getbbox("国")
+        header = header_box[3] - header_box[1] + template.font_size // 2
         return _LaidBlock(
             block.kind,
             (),
-            step * (len(block.rows) + 1),
+            header + step * max(len(block.rows) - 1, 0) + step // 3,
             rows=tuple(row + ("",) * (columns - len(row)) for row in block.rows),
         )
     marker = "• " if block.kind == "bullet" else block.marker
-    prefix = int(base.getlength(marker)) + 12 if marker else 0
+    level = block.indent // 2
+    nested = level * template.font_size if marker else 0
+    marker_width = int(base.getlength(marker)) + 12 if marker else 0
+    prefix = marker_width + nested
     quote = template.font_size if block.kind == "quote" else 0
     wrapped = _wrap_runs(block.lines[0], fonts, max(width - prefix - quote, 1), base)
     gap = step // 2 if block.kind.startswith("h") else step // 3
@@ -588,6 +591,7 @@ def _layout_block(
         step * len(wrapped) + gap,
         prefix + quote,
         marker=marker,
+        marker_width=marker_width,
     )
 
 
@@ -656,7 +660,7 @@ def _paint_block(
         prefix = block.marker if index == 0 else ""
         _paint_runs(
             draw,
-            (x - (int(base.getlength(prefix)) + 12 if prefix else 0), y + index * step),
+            (x - block.marker_width if prefix else x, y + index * step),
             ((_Run(prefix, bold=True),) if prefix else ()) + line,
             fonts,
             template,
@@ -735,25 +739,29 @@ def _paint_table(
     left = template.margin
     width = template.width - template.margin * 2
     column_width = width // columns
-    bottom = y + step * len(block.rows)
+    header_box = fonts.bold.getbbox("国")
+    header_step = header_box[3] - header_box[1] + template.font_size // 2
+    bottom = y + header_step + step * max(len(block.rows) - 1, 0)
     for index, row in enumerate(block.rows):
-        top = y + index * step
+        row_step = header_step if index == 0 else step
+        top = y + (header_step if index else 0) + step * max(index - 1, 0)
         if index == 0:
             draw.rectangle(
-                (left, top, left + width, top + step), fill=template.code_background
+                (left, top, left + width, top + row_step), fill=template.code_background
             )
         for column, cell in enumerate(row):
             cell_left = left + column * column_width
             draw.rectangle(
-                (cell_left, top, cell_left + column_width, top + step),
+                (cell_left, top, cell_left + column_width, top + row_step),
                 outline=template.quote,
                 width=1,
             )
             font = fonts.bold if index == 0 else fonts.regular
             box = font.getbbox("国")
+            glyph_height = box[3] - box[1]
             _paint_runs(
                 draw,
-                (cell_left + 16, top + (step - (box[3] - box[1])) // 2 - box[1]),
+                (cell_left + 16, top + (row_step - glyph_height) // 2 - box[1]),
                 (_Run(cell, bold=index == 0),),
                 fonts,
                 template,
@@ -792,44 +800,13 @@ def _paint_runs(
     for run in runs:
         for kind, piece in _runs(run.text):
             if kind == "emoji" and fonts.emoji is not None:
-                canvas = _EMOJI_BITMAP_SIZE + 32
-                glyph = Image.new("RGBA", (canvas, canvas))
-                ImageDraw.Draw(glyph).text(
-                    (16, 16),
-                    piece,
-                    font=fonts.emoji,
-                    embedded_color=True,
-                )
-                box = glyph.getbbox()
-                if box:
-                    glyph = glyph.crop(box)
-                    fitted = Image.new("RGBA", (emoji_size, emoji_size))
-                    scale = min(
-                        emoji_size / glyph.width,
-                        emoji_size / glyph.height,
-                        1,
+                fitted = _emoji_glyph(fonts.emoji.path, piece, emoji_size)
+                image = getattr(draw, "_image", None)
+                if fitted is not None and isinstance(image, Image.Image):
+                    image.alpha_composite(
+                        fitted, (x, y + line_center - emoji_size // 2)
                     )
-                    resized = glyph.resize(
-                        (
-                            max(int(glyph.width * scale), 1),
-                            max(int(glyph.height * scale), 1),
-                        ),
-                        Image.Resampling.LANCZOS,
-                    )
-                    fitted.alpha_composite(
-                        resized,
-                        (
-                            (emoji_size - resized.width) // 2,
-                            emoji_size - resized.height,
-                        ),
-                    )
-                    image = getattr(draw, "_image", None)
-                    if isinstance(image, Image.Image):
-                        image.alpha_composite(
-                            fitted,
-                            (x, y + line_center - emoji_size // 2),
-                        )
-                    x += emoji_size + 4
+                    x += fitted.width + 4
                 continue
             font = _run_font(run, fonts, base)
             fill = (
@@ -847,7 +824,7 @@ def _paint_runs(
                 break
             inline = run.code and base is not fonts.code
             if inline:
-                pad_x = max(template.font_size // 5, 6)
+                pad_x = _inline_pad(fonts.code)
                 pad_y = max(template.font_size // 12, 2)
                 draw.rounded_rectangle(
                     (
@@ -888,7 +865,7 @@ def _paint_runs(
                         width=max(template.font_size // 16, 2),
                     )
                 x += int(item_font.getlength(item))
-            x += max(template.font_size // 5, 6) * 2 + 8 if inline else 0
+            x += _inline_pad(font) * 2 + 8 if inline else 0
 
 
 def _paint_oblique(
@@ -997,12 +974,12 @@ def _wrap_runs(
             taken = ""
             taken_width = 0
             inline = pending.code and base_font is not fonts.code
-            pad = max(getattr(font, "size", 32) // 6, 4) * 2 if inline else 0
+            pad = (_inline_pad(font) * 2 + 8) if inline else 0
+            box = fonts.regular.getbbox("\u56fd")
+            emoji_width = max(box[3] - box[1], 1) + 4
             for char in pending.text:
                 emoji = bool(_EMOJI_RE.fullmatch(char) and fonts.emoji)
-                char_width = (
-                    getattr(font, "size", 32) if emoji else int(font.getlength(char))
-                )
+                char_width = emoji_width if emoji else int(font.getlength(char))
                 if taken and not inline and used + taken_width + char_width > width:
                     break
                 taken += char
@@ -1051,6 +1028,56 @@ def _load_font(
     return ImageFont.load_default()
 
 
+def _inline_pad(font: ImageFont.ImageFont) -> int:
+    """Return one side of the padding around an inline code chip."""
+    return max(getattr(font, "size", 32) // 5, 6)
+
+
+def _glyph_missing(
+    font: ImageFont.ImageFont,
+    body_font: ImageFont.ImageFont,
+    char: str,
+) -> bool:
+    """Return whether a code font only has a narrow placeholder for a character."""
+    return bool(char.strip() and font.getlength(char) < body_font.getlength(char) * 0.8)
+
+
+@lru_cache(maxsize=256)
+def _emoji_glyph(font_path: str, text: str, size: int) -> Image.Image | None:
+    """Render one color emoji into a square that preserves its full bitmap.
+
+    Args:
+        font_path: Color emoji font. It is loaded at its only valid size.
+        text: One emoji sequence.
+        size: Target square size in pixels.
+
+    Returns:
+        The fitted glyph, or None when the font has no visible pixels.
+    """
+    try:
+        font = ImageFont.truetype(font_path, _EMOJI_BITMAP_SIZE)
+    except OSError:
+        return None
+    canvas = _EMOJI_BITMAP_SIZE + 32
+    glyph = Image.new("RGBA", (canvas, canvas))
+    ImageDraw.Draw(glyph).text((16, 16), text, font=font, embedded_color=True)
+    box = glyph.getbbox()
+    if not box:
+        return None
+    glyph = glyph.crop(box)
+    fitted = Image.new("RGBA", (size, size))
+    scale = min(size / glyph.width, size / glyph.height, 1)
+    resized = glyph.resize(
+        (max(int(glyph.width * scale), 1), max(int(glyph.height * scale), 1)),
+        Image.Resampling.LANCZOS,
+    )
+    fitted.alpha_composite(
+        resized,
+        ((size - resized.width) // 2, size - resized.height),
+    )
+    return fitted
+
+
 def _needs_body_font(
     font: ImageFont.ImageFont,
     body_font: ImageFont.ImageFont,
@@ -1068,10 +1095,7 @@ def _needs_body_font(
         Cascadia draws its missing-glyph box at the monospace advance, so the
         mask alone cannot identify it.
     """
-    return any(
-        char.strip() and font.getlength(char) < body_font.getlength(char) * 0.8
-        for char in text
-    )
+    return any(_glyph_missing(font, body_font, char) for char in text)
 
 
 def _font_groups(
@@ -1083,10 +1107,7 @@ def _font_groups(
     groups: list[tuple[ImageFont.ImageFont, str]] = []
     for char in text:
         selected = (
-            body_font
-            if char.strip()
-            and code_font.getlength(char) < body_font.getlength(char) * 0.8
-            else code_font
+            body_font if _glyph_missing(code_font, body_font, char) else code_font
         )
         if groups and groups[-1][0] is selected:
             groups[-1] = (selected, groups[-1][1] + char)

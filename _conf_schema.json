@@ -2,7 +2,7 @@
   "llm_tool_options": {
     "type": "list",
     "description": "LLM 工具",
-    "hint": "选择向 LLM 暴露的主动工具。未勾选的工具不会注册，模型也就看不到、无法调用。合并转发和文转图片的被动处理不受此配置影响。",
+    "hint": "选择向 LLM 暴露的主动工具。未勾选的工具不会注册。合并转发和文转图片的被动处理不受此配置影响。",
     "options": [
       "send_forward_message",
       "send_text_as_image"
@@ -24,7 +24,7 @@
       "enable": {
         "type": "bool",
         "description": "自动注入标记说明",
-        "hint": "只注入已开启功能对应的部分。关闭后不再注入，可将下方提示词复制进人格提示词自行维护。",
+        "hint": "只注入已开启功能对应的部分。关闭后不再自动注入，可将提示词复制进人格提示词自行维护。",
         "default": true
       },
       "prompt": {
@@ -43,7 +43,7 @@
       "enable": {
         "type": "bool",
         "description": "启用分段回复",
-        "default": false
+        "default": true
       },
       "words_threshold": {
         "type": "int",
@@ -69,7 +69,8 @@
           "？",
           "！",
           "……",
-          "~"
+          "~",
+          "\n"
         ]
       },
       "pair_symbols": {
@@ -98,12 +99,12 @@
         "type": "float",
         "description": "打字速度",
         "hint": "每秒字符数。每段发送前按该速度计算等待时间，数值越大发送越快。",
-        "default": 8.0
+        "default": 30.0
       },
       "trim_head_chars": {
         "type": "list",
         "description": "清理句首字符",
-        "hint": "分段后从每段开头移除这些字符。填写 \\n 表示换行。",
+        "hint": "分段后从每段开头移除这些字符。",
         "items": {
           "type": "string"
         },
@@ -114,7 +115,7 @@
       "trim_chars": {
         "type": "list",
         "description": "清理句尾字符",
-        "hint": "分段后从每段末尾移除这些字符。填写 \\n 表示换行。",
+        "hint": "分段后从每段末尾移除这些字符。",
         "items": {
           "type": "string"
         },
@@ -149,7 +150,7 @@
         "type": "int",
         "description": "自动引用间隔",
         "hint": "回复时若距原消息已间隔这么多条消息，则自动引用原消息。设为 0 关闭自动引用，仅依靠模型输出的标记。",
-        "default": 0
+        "default": 2
       }
     }
   },
@@ -179,13 +180,13 @@
       "enable": {
         "type": "bool",
         "description": "启用合并转发",
-        "default": false
+        "default": true
       },
       "text_threshold": {
         "type": "int",
         "description": "长度阈值",
         "hint": "文本字数达到该值时改为合并转发。",
-        "default": 500
+        "default": 300
       },
       "sentences_threshold": {
         "type": "int",
@@ -235,7 +236,7 @@
         "type": "string",
         "description": "Pillow 模板",
         "hint": "仅在渲染器选择 Pillow 时生效。留空使用插件自带的亮色模板 templates/light.json，暗色模板是 templates/dark.json。也可以填写自己的 JSON 模板绝对路径。",
-        "default": ""
+        "default": "templates/light.json"
       },
       "font_path": {
         "type": "string",
