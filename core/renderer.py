@@ -246,7 +246,13 @@ def _load_template(path: str) -> PillowTemplate:
         return _FALLBACK_TEMPLATE
     colors = {
         name: _color(raw.get(name), getattr(_FALLBACK_TEMPLATE, name))
-        for name in ("background", "foreground", "muted", "code_background", "quote")
+        for name in (
+            "background",
+            "foreground",
+            "muted",
+            "code_background",
+            "quote",
+        )
     }
     return PillowTemplate(
         width=_positive(raw.get("width"), _FALLBACK_TEMPLATE.width),
@@ -616,7 +622,7 @@ def _paint_block(
             fill=template.code_background,
         )
         line_y = y + pad // 2
-        for line in _highlight(block.lines, block.language):
+        for line in _highlight(block.lines, block.language, template):
             _paint_runs(
                 draw,
                 (template.margin + pad, line_y),
@@ -661,12 +667,14 @@ def _paint_block(
 def _highlight(
     lines: tuple[tuple[_Run, ...], ...],
     language: str,
+    template: PillowTemplate,
 ) -> tuple[tuple[_Run, ...], ...]:
     """Color one fenced code block when its language is known.
 
     Args:
         lines: Wrapped source lines.
         language: Fence language. An unknown name stays uncolored.
+        template: Page colors. A dark page uses lighter syntax colors.
 
     Returns:
         One run sequence per source line.
@@ -674,15 +682,16 @@ def _highlight(
     source = "\n".join("".join(run.text for run in line) for line in lines)
     if not language:
         return tuple((_Run(line, code=True),) for line in source.split("\n"))
+    dark = sum(template.background) < 384
     colors = {
-        Token.Keyword: "#7C3AED",
-        Token.Name.Function: "#0369A1",
-        Token.Name.Class: "#B45309",
-        Token.String: "#047857",
-        Token.Number: "#B45309",
-        Token.Comment: "#6B7280",
-        Token.Operator: "#BE123C",
-        Token.Punctuation: "#6B7280",
+        Token.Keyword: "#C4B5FD" if dark else "#7C3AED",
+        Token.Name.Function: "#7DD3FC" if dark else "#0369A1",
+        Token.Name.Class: "#FDBA74" if dark else "#C2410C",
+        Token.String: "#86EFAC" if dark else "#047857",
+        Token.Number: "#FDBA74" if dark else "#C2410C",
+        Token.Comment: "#9CA3AF" if dark else "#6B7280",
+        Token.Operator: "#FDA4AF" if dark else "#BE123C",
+        Token.Punctuation: "#D1D5DB" if dark else "#4B5563",
     }
     try:
         tokens = get_lexer_by_name(language).get_tokens(source)
@@ -741,14 +750,15 @@ def _paint_table(
                 width=1,
             )
             font = fonts.bold if index == 0 else fonts.regular
-            visible = cell
-            while len(visible) > 1 and font.getlength(visible) > column_width - 20:
-                visible = visible[:-1]
-            draw.text(
-                (cell_left + 10, top + max((step - template.font_size) // 2, 4)),
-                visible,
-                font=font,
-                fill=template.foreground,
+            box = font.getbbox("国")
+            _paint_runs(
+                draw,
+                (cell_left + 16, top + (step - (box[3] - box[1])) // 2 - box[1]),
+                (_Run(cell, bold=index == 0),),
+                fonts,
+                template,
+                font,
+                column_width - 32,
             )
     draw.rectangle((left, y, left + width, bottom), outline=template.quote, width=2)
 
@@ -760,6 +770,7 @@ def _paint_runs(
     fonts: _Fonts,
     template: PillowTemplate,
     base_font: ImageFont.ImageFont | None = None,
+    max_width: int | None = None,
 ) -> None:
     """Paint styled runs, inline-code chips, and scaled color emoji.
 
@@ -770,17 +781,21 @@ def _paint_runs(
         fonts: Body, emphasis, code, and emoji fonts.
         template: Colors and font size.
         base_font: Font used by plain runs. Headings pass their larger font.
+        max_width: Optional pixel limit, used to keep table cells inside borders.
     """
     x, y = origin
     base = base_font or fonts.regular
-    body = base.getbbox("国")
-    body_height = max(body[3] - body[1], template.font_size)
+    body_box = fonts.regular.getbbox("国")
+    emoji_size = max(body_box[3] - body_box[1], 1)
+    line_box = base.getbbox("M" if base is fonts.code else "国")
+    line_center = (line_box[1] + line_box[3]) // 2
     for run in runs:
         for kind, piece in _runs(run.text):
             if kind == "emoji" and fonts.emoji is not None:
-                glyph = Image.new("RGBA", (_EMOJI_BITMAP_SIZE * 2, _EMOJI_BITMAP_SIZE))
+                canvas = _EMOJI_BITMAP_SIZE + 32
+                glyph = Image.new("RGBA", (canvas, canvas))
                 ImageDraw.Draw(glyph).text(
-                    (0, 0),
+                    (16, 16),
                     piece,
                     font=fonts.emoji,
                     embedded_color=True,
@@ -788,13 +803,33 @@ def _paint_runs(
                 box = glyph.getbbox()
                 if box:
                     glyph = glyph.crop(box)
-                    glyph.thumbnail(
-                        (body_height, body_height), Image.Resampling.LANCZOS
+                    fitted = Image.new("RGBA", (emoji_size, emoji_size))
+                    scale = min(
+                        emoji_size / glyph.width,
+                        emoji_size / glyph.height,
+                        1,
+                    )
+                    resized = glyph.resize(
+                        (
+                            max(int(glyph.width * scale), 1),
+                            max(int(glyph.height * scale), 1),
+                        ),
+                        Image.Resampling.LANCZOS,
+                    )
+                    fitted.alpha_composite(
+                        resized,
+                        (
+                            (emoji_size - resized.width) // 2,
+                            emoji_size - resized.height,
+                        ),
                     )
                     image = getattr(draw, "_image", None)
                     if isinstance(image, Image.Image):
-                        image.alpha_composite(glyph, (x, y + body[1]))
-                    x += glyph.width + 4
+                        image.alpha_composite(
+                            fitted,
+                            (x, y + line_center - emoji_size // 2),
+                        )
+                    x += emoji_size + 4
                 continue
             font = _run_font(run, fonts, base)
             fill = (
@@ -802,42 +837,58 @@ def _paint_runs(
                 if run.color
                 else template.foreground
             )
-            drawn = int(font.getlength(piece))
+            fallback = fonts.regular if base is fonts.code else base
+            if run.code and _needs_body_font(font, fallback, piece):
+                groups = _font_groups(piece, font, fallback)
+            else:
+                groups = ((font, piece),)
+            drawn = sum(int(item_font.getlength(item)) for item_font, item in groups)
+            if max_width is not None and x + drawn > origin[0] + max_width:
+                break
             inline = run.code and base is not fonts.code
             if inline:
-                pad = max(template.font_size // 6, 4)
-                box = font.getbbox(piece or " ")
+                pad_x = max(template.font_size // 5, 6)
+                pad_y = max(template.font_size // 12, 2)
                 draw.rounded_rectangle(
                     (
-                        x - pad,
-                        y + box[1] - pad // 2,
-                        x + drawn + pad,
-                        y + box[3] + pad // 2,
+                        x - pad_x,
+                        y + body_box[1] - pad_y,
+                        x + drawn + pad_x,
+                        y + body_box[3] + pad_y,
                     ),
-                    radius=6,
+                    radius=8,
                     fill=template.code_background,
                 )
-            if run.italic and not run.code:
-                _paint_oblique(draw, (x, y), piece, font, fill, run.bold)
-            else:
-                draw.text(
-                    (x, y),
-                    piece,
-                    font=font,
-                    fill=fill,
-                    stroke_width=1 if run.bold else 0,
-                    stroke_fill=fill,
+            for item_font, item in groups:
+                item_fill = fill
+                item_box = item_font.getbbox(
+                    "国" if item_font is not fonts.code else "M"
                 )
-            if run.strike:
-                box = font.getbbox(piece or " ")
-                middle = y + (box[1] + box[3]) // 2
-                draw.line(
-                    (x, middle, x + drawn, middle),
-                    fill=fill,
-                    width=max(template.font_size // 16, 2),
-                )
-            inline = run.code and base_font is not fonts.code
-            x += drawn + (max(template.font_size // 6, 4) * 2 if inline else 0)
+                item_y = y + line_center - (item_box[1] + item_box[3]) // 2
+                if run.italic and not run.code:
+                    _paint_oblique(
+                        draw, (x, item_y), item, item_font, item_fill, run.bold
+                    )
+                else:
+                    draw.text(
+                        (x, item_y),
+                        item,
+                        font=item_font,
+                        fill=item_fill,
+                        stroke_width=1 if run.bold else 0,
+                        stroke_fill=item_fill,
+                    )
+                if run.strike:
+                    box = item_font.getbbox(item or " ")
+                    middle = item_y + (box[1] + box[3]) // 2
+                    item_width = int(item_font.getlength(item))
+                    draw.line(
+                        (x, middle, x + item_width, middle),
+                        fill=item_fill,
+                        width=max(template.font_size // 16, 2),
+                    )
+                x += int(item_font.getlength(item))
+            x += max(template.font_size // 5, 6) * 2 + 8 if inline else 0
 
 
 def _paint_oblique(
@@ -998,6 +1049,50 @@ def _load_font(
         return None
     logger.warning("[OutputEnhance] No CJK font found; text may render as boxes.")
     return ImageFont.load_default()
+
+
+def _needs_body_font(
+    font: ImageFont.ImageFont,
+    body_font: ImageFont.ImageFont,
+    text: str,
+) -> bool:
+    """Return whether the code font draws a character narrower than body text.
+
+    Args:
+        font: Monospace font selected for the code run.
+        body_font: CJK font that can draw the missing characters.
+        text: Characters about to be drawn.
+
+    Returns:
+        True when a non-space character is only a fraction of the body width.
+        Cascadia draws its missing-glyph box at the monospace advance, so the
+        mask alone cannot identify it.
+    """
+    return any(
+        char.strip() and font.getlength(char) < body_font.getlength(char) * 0.8
+        for char in text
+    )
+
+
+def _font_groups(
+    text: str,
+    code_font: ImageFont.ImageFont,
+    body_font: ImageFont.ImageFont,
+) -> tuple[tuple[ImageFont.ImageFont, str], ...]:
+    """Keep monospace characters together and isolate missing glyphs."""
+    groups: list[tuple[ImageFont.ImageFont, str]] = []
+    for char in text:
+        selected = (
+            body_font
+            if char.strip()
+            and code_font.getlength(char) < body_font.getlength(char) * 0.8
+            else code_font
+        )
+        if groups and groups[-1][0] is selected:
+            groups[-1] = (selected, groups[-1][1] + char)
+        else:
+            groups.append((selected, char))
+    return tuple(groups)
 
 
 def _runs(text: str) -> list[tuple[str, str]]:
