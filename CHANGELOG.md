@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.4
+
+- Pillow 渲染常见 Markdown，不再原样显示格式符号。
+- 默认 Emoji 字体改为彩色 Noto Color Emoji。
+- 修复分段清理中的 `\n` 被当成普通字符，导致换行清不掉。
+
 ## v0.1.3
 
 - 文转图片可在 Pillow 和 AstrBot T2I 之间选择。

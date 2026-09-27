@@ -37,9 +37,22 @@ def _as_dict(value: object) -> dict[str, Any]:
 
 def _as_str_list(value: object, fallback: list[str]) -> list[str]:
     if not isinstance(value, list):
-        return list(fallback)
-    items = [str(item) for item in value if str(item)]
-    return items or list(fallback)
+        return [_unescape(item) for item in fallback]
+    items = [_unescape(str(item)) for item in value if str(item)]
+    return items or [_unescape(item) for item in fallback]
+
+
+def _unescape(value: str) -> str:
+    """Turn config escapes into the characters they describe.
+
+    Args:
+        value: One configured string. WebUI stores a newline entry as the two
+            characters ``\\n`` rather than a line break.
+
+    Returns:
+        The string with ``\\n``, ``\\r``, and ``\\t`` decoded.
+    """
+    return value.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
 
 
 def _as_int(value: object, fallback: int, minimum: int = 0) -> int:
@@ -248,10 +261,10 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
             ],
         ),
         seg_typing_speed=_as_float(segmented.get("typing_speed"), 8.0),
-        seg_trim_head_chars=_as_str_list(segmented.get("trim_head_chars"), ["\n"]),
+        seg_trim_head_chars=_as_str_list(segmented.get("trim_head_chars"), ["\\n"]),
         seg_trim_chars=_as_str_list(
             segmented.get("trim_chars"),
-            ["。", "！", "？", "，", "；", "、", ",", ".", ";", " ", "\n"],
+            ["。", "！", "？", "，", "；", "、", ",", ".", ";", " ", "\\n"],
         ),
         quote_enable=_as_bool(quote.get("enable"), True),
         auto_quote_interval=_as_int(quote.get("auto_quote_interval"), 0),
@@ -275,7 +288,7 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
         ),
         emoji_font_path=str(
             text_to_image.get("emoji_font_path")
-            or "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notoemoji/NotoEmoji[wght].ttf"
+            or "https://cdn.jsdelivr.net/gh/googlefonts/noto-emoji@main/2D/fonts/NotoColorEmoji.ttf"
         ),
         auto_page=_as_bool(text_to_image.get("auto_page"), True),
         error_enable=_as_bool(error.get("enable"), True),

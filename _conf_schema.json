@@ -103,7 +103,7 @@
       "trim_head_chars": {
         "type": "list",
         "description": "清理句首字符",
-        "hint": "分段后从每段开头移除这些字符。",
+        "hint": "分段后从每段开头移除这些字符。填写 \\n 表示换行。",
         "items": {
           "type": "string"
         },
@@ -114,7 +114,7 @@
       "trim_chars": {
         "type": "list",
         "description": "清理句尾字符",
-        "hint": "分段后从每段末尾移除这些字符。",
+        "hint": "分段后从每段末尾移除这些字符。填写 \\n 表示换行。",
         "items": {
           "type": "string"
         },
@@ -246,8 +246,8 @@
       "emoji_font_path": {
         "type": "string",
         "description": "Emoji 字体",
-        "hint": "正文遇到 emoji 时使用的字体。默认是 Noto Emoji；填入 URL 时同样会下载到插件数据目录并改写为本地路径。",
-        "default": "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notoemoji/NotoEmoji[wght].ttf"
+        "hint": "正文遇到 emoji 时使用的字体。默认是彩色 Noto Color Emoji；填入 URL 时同样会下载到插件数据目录并改写为本地路径。",
+        "default": "https://cdn.jsdelivr.net/gh/googlefonts/noto-emoji@main/2D/fonts/NotoColorEmoji.ttf"
       },
       "auto_page": {
         "type": "bool",

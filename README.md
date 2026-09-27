@@ -43,7 +43,7 @@ AstrBot 插件：让模型用输出标记表达 @、引用、分段和转图片�
 
 | 渲染器 | 特点 |
 | --- | --- |
-| Pillow | 本地渲染，轻量快速，可自定义正文字体、Emoji 字体和 JSON 模板。自带 `templates/light.json` 和 `templates/dark.json`，留空使用亮色。不支持数学公式，公式会按原文字符绘制。 |
+| Pillow | 本地渲染，轻量快速，可自定义正文字体、Emoji 字体和 JSON 模板。支持常见 Markdown，默认使用彩色 Emoji。自带 `templates/light.json` 和 `templates/dark.json`，留空使用亮色。不支持数学公式。 |
 | AstrBot T2I | 使用 AstrBot 的文转图服务，可以渲染 Markdown 和数学公式。速度较慢，依赖渲染服务；模板样式在 AstrBot 自己的文转图配置里设置，不在本插件配置。 |
 
 ## 被动处理

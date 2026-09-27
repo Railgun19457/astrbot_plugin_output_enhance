@@ -1,11 +1,12 @@
 {
-  "width": 920,
-  "margin": 56,
+  "width": 960,
+  "margin": 64,
   "font_size": 32,
-  "line_height": 1.6,
+  "line_height": 1.7,
   "max_height": 1800,
-  "accent_width": 8,
-  "background": "#1C1C1F",
-  "foreground": "#E8E6E3",
-  "accent": "#D6AA7A"
+  "background": "#17171A",
+  "foreground": "#F3F4F6",
+  "muted": "#9CA3AF",
+  "code_background": "#27272A",
+  "quote": "#4B5563"
 }
