@@ -178,7 +178,7 @@
       "sentences_threshold": {
         "type": "int",
         "description": "句数阈值",
-        "hint": "分段后的消息条数超过该值时改为合并转发。",
+        "hint": "分段后的消息条数超过该值时改为合并转发，每个分段成为转发里的一条消息。",
         "default": 10
       },
       "default_nickname": {

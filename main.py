@@ -144,9 +144,8 @@ class OutputEnhancePlugin(Star):
                     result.use_t2i(False)
                     return
             if should_forward(chain, self.config, event.get_platform_name()):
-                result.chain = to_nodes(
-                    chain, self.config.default_nickname, event.get_self_id()
-                )
+                segments = groups if len(groups) > 1 else [chain]
+                result.chain = to_nodes(segments, self.config.default_nickname)
                 return
         except Exception:
             logger.exception(
@@ -180,9 +179,13 @@ class OutputEnhancePlugin(Star):
         await self._intercept(event, detail)
 
     async def _intercept(self, event: AstrMessageEvent, detail: str) -> None:
-        """Stop the original reply, optionally notice the user, and forward it."""
+        """Drop the original reply, optionally notice the user, and forward it.
+
+        The event itself is not stopped. Decoration runs while the agent stage
+        is waiting at a yield; stopping here would skip ``astr_agent_complete``
+        and the conversation-history write.
+        """
         logger.info("[OutputEnhance] Reply intercepted.")
-        event.stop_event()
         event.clear_result()
         notice = self.config.user_notice.strip()
         if notice:

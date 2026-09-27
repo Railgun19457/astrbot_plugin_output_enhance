@@ -71,7 +71,6 @@ class SendForwardTool(FunctionTool[None]):
             return "发送失败：没有可转发的节点。"
 
         built: list[Node] = []
-        self_id = event.get_self_id() or "0"
         for item in nodes:
             if not isinstance(item, dict):
                 continue
@@ -82,7 +81,10 @@ class SendForwardTool(FunctionTool[None]):
                 str(item.get("nickname") or "").strip()
                 or plugin.config.default_nickname
             )
-            built.append(Node(name=nickname, uin=self_id, content=[Plain(content)]))
+            # QQ resolves a real member uin to that member's group card and
+            # discards the custom nickname inside the opened forward. "0" is
+            # not a member, so the nickname supplied here is kept.
+            built.append(Node(name=nickname, uin="0", content=[Plain(content)]))
         if not built:
             return "发送失败：节点内容为空。"
 

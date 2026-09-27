@@ -223,25 +223,30 @@ def should_render_image(
 
 
 def to_nodes(
-    chain: list[BaseMessageComponent],
+    groups: list[list[BaseMessageComponent]],
     nickname: str,
-    self_id: str,
 ) -> list[Nodes]:
-    """Wrap plain segments into one forward message sent as the bot.
+    """Wrap each text segment into its own forward node.
 
     Args:
-        chain: Text components to forward.
+        groups: Segment groups. One group becomes one message inside the
+            forward. A reply that was never split is a single group.
         nickname: Display name used for every node.
-        self_id: Bot account id used as the node sender.
 
     Returns:
-        A single ``Nodes`` component.
+        A single ``Nodes`` component. The sender id is ``0`` so QQ keeps the
+        custom nickname instead of replacing it with the bot's group card.
     """
-    content: list[BaseMessageComponent] = [
-        comp for comp in chain if isinstance(comp, Plain) and comp.text.strip()
-    ]
-    node = Node(name=nickname, uin=self_id or "0", content=content or [Plain("")])
-    return [Nodes([node])]
+    nodes: list[Node] = []
+    for group in groups:
+        content = [
+            comp for comp in group if isinstance(comp, Plain) and comp.text.strip()
+        ]
+        if content:
+            nodes.append(Node(name=nickname, uin="0", content=content))
+    if not nodes:
+        nodes.append(Node(name=nickname, uin="0", content=[Plain("")]))
+    return [Nodes(nodes)]
 
 
 def image_component(path_or_url: str) -> Image:
