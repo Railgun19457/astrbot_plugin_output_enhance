@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import (
     At,
@@ -115,6 +117,9 @@ def prepare_chain(
         Message groups to send in order, and whether image rendering should
         replace the whole text reply. Failures are handled by the caller.
     """
+    if not _segment_this_result(event, config):
+        config = replace(config, seg_enable=False)
+
     platform = event.get_platform_name()
     platform_at = supports(platform, "at")
     platform_reply = supports(platform, "reply")
@@ -175,6 +180,26 @@ def prepare_chain(
         return candidates, force_image
 
     return [_without_breaks(converted)], force_image
+
+
+def _segment_this_result(event: AstrMessageEvent, config: PluginConfig) -> bool:
+    """Return whether this reply should be split into multiple messages.
+
+    Args:
+        event: Event being replied to.
+        config: Segment switches.
+
+    Returns:
+        False when segmentation is off, or when the message comes from another
+        plugin and plugin-message segmentation is disabled. Model replies,
+        including agent runner errors, still follow the main segment switch.
+    """
+    if not config.seg_enable:
+        return False
+    if config.seg_plugin_messages:
+        return True
+    result = event.get_result()
+    return result is not None and result.is_model_result()
 
 
 def _candidate_segments(
