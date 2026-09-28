@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import collections.abc
+import functools
 import inspect
 from typing import Any
 
@@ -12,96 +14,138 @@ PROACTIVE_PROMPT_MARKER = "You are now responding to a scheduled task."
 _NORMAL_CHAT_MARKER = "output_enhance_normal_chat"
 _REQUEST_MARKER = "_output_enhance_normal_chat"
 _PATCH_MARKER = "_output_enhance_send_tool_patch"
+_PATCHES = (
+    (
+        "astrbot.core.agent.runners.tool_loop_agent_runner",
+        "ToolLoopAgentRunner",
+        "_iter_llm_responses_with_fallback",
+    ),
+    (
+        "astrbot.core.agent.runners.tool_loop_agent_runner",
+        "ToolLoopAgentRunner",
+        "_resolve_tool_exec",
+    ),
+    (
+        "astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal",
+        "InternalAgentSubStage",
+        "process",
+    ),
+    (
+        "astrbot.core.pipeline.process_stage.method.agent_sub_stages.third_party",
+        "ThirdPartyAgentSubStage",
+        "process",
+    ),
+)
 
-_runner_cls: type | None = None
-_runner_method: Any = None
-_stage_cls: type | None = None
-_stage_method: Any = None
 _installed = False
-_users = 0
+_originals: dict[tuple[type, str], Any] = {}
 
 
 def install() -> bool:
-    """Patch the runner and agent stage used by plain tool sends.
+    """Patch the runners and agent stages used by plain tool sends.
 
     Returns:
-        True when both patches are installed. A missing AstrBot entry point
-        leaves the previous methods untouched.
+        True when every entry point is patched. A missing or unexpected
+        AstrBot method leaves previously installed patches untouched.
     """
-    global _installed, _users
+    global _installed
     if _installed:
-        _users += 1
         return True
 
-    runner_cls = _load_runner_cls()
-    stage_cls = _load_stage_cls()
-    if runner_cls is None or stage_cls is None:
-        return False
+    loaded: list[tuple[type, str, Any]] = []
+    for module_name, class_name, method_name in _PATCHES:
+        owner = _load_owner(module_name, class_name)
+        if owner is None:
+            return False
+        method = getattr(owner, method_name, None)
+        if getattr(method, _PATCH_MARKER, False):
+            logger.warning(
+                "[OutputEnhance] %s.%s is already patched; "
+                "plain tool sends will not be converted.",
+                class_name,
+                method_name,
+            )
+            return False
+        if not _is_coroutine(method):
+            logger.warning(
+                "[OutputEnhance] %s.%s changed; "
+                "plain tool sends will not be converted.",
+                class_name,
+                method_name,
+            )
+            return False
+        loaded.append((owner, method_name, method))
 
-    runner_method = runner_cls._iter_llm_responses_with_fallback
-    stage_method = stage_cls.process
-    if not _is_async_generator(runner_method) or not _is_async_generator(stage_method):
-        logger.warning(
-            "[OutputEnhance] AstrBot send-tool entry points changed; "
-            "plain tool sends will not be converted."
-        )
-        return False
+    for owner, method_name, method in loaded:
+        _originals[(owner, method_name)] = method
+        if method_name == "_iter_llm_responses_with_fallback":
+            wrapped = _wrap_responses(method)
+        elif method_name == "_resolve_tool_exec":
+            wrapped = _wrap_requery(method)
+        else:
+            wrapped = _wrap_stage(method)
+        # Keep the captured method reachable after this module is replaced
+        # by a plugin reload.
+        functools.update_wrapper(wrapped, method)
+        setattr(wrapped, _PATCH_MARKER, True)
+        setattr(owner, method_name, wrapped)
 
-    async def iter_responses(runner: Any):
-        async for response in runner_method(runner):
-            yield rewrite_plain_send(runner, response)
-
-    async def process_stage(stage: Any, event: Any, provider_wake_prefix: str):
-        mark_normal_chat(event)
-        async for item in stage_method(stage, event, provider_wake_prefix):
-            yield item
-
-    setattr(iter_responses, _PATCH_MARKER, True)
-    setattr(process_stage, _PATCH_MARKER, True)
-    runner_cls._iter_llm_responses_with_fallback = iter_responses
-    stage_cls.process = process_stage
-
-    global _runner_cls, _runner_method, _stage_cls, _stage_method
-    _runner_cls = runner_cls
-    _runner_method = runner_method
-    _stage_cls = stage_cls
-    _stage_method = stage_method
     _installed = True
-    _users = 1
     logger.info("[OutputEnhance] Plain send_message_to_user calls will be converted.")
     return True
 
 
 def uninstall() -> None:
     """Restore the methods captured when the patch was installed."""
-    global _installed, _users, _runner_cls, _runner_method, _stage_cls, _stage_method
+    global _installed
     if not _installed:
         return
-    _users -= 1
-    if _users > 0:
-        return
-    if (
-        _runner_cls is not None
-        and _runner_method is not None
-        and getattr(_runner_cls._iter_llm_responses_with_fallback, _PATCH_MARKER, False)
-    ):
-        _runner_cls._iter_llm_responses_with_fallback = _runner_method
-    if (
-        _stage_cls is not None
-        and _stage_method is not None
-        and getattr(_stage_cls.process, _PATCH_MARKER, False)
-    ):
-        _stage_cls.process = _stage_method
-    _runner_cls = None
-    _runner_method = None
-    _stage_cls = None
-    _stage_method = None
+    for (owner, method_name), method in list(_originals.items()):
+        current = getattr(owner, method_name, None)
+        if getattr(current, _PATCH_MARKER, False):
+            setattr(owner, method_name, method)
+    _originals.clear()
     _installed = False
-    _users = 0
+
+
+def _wrap_responses(method: Any):
+    async def iter_responses(runner: Any):
+        async for response in method(runner):
+            yield rewrite_plain_send(runner, response)
+
+    return iter_responses
+
+
+def _wrap_requery(method: Any):
+    async def resolve_tool_exec(runner: Any, response: Any):
+        # skills_like re-queries the model. Apply the same plain-send rule to
+        # that second response, otherwise the original tool call still runs.
+        result = await method(runner, response)
+        if not isinstance(result, tuple) or not result:
+            return result
+        rewritten = rewrite_plain_send(runner, result[0])
+        if rewritten is result[0]:
+            return result
+        return (rewritten, *result[1:])
+
+    return resolve_tool_exec
+
+
+def _wrap_stage(method: Any):
+    async def process_stage(stage: Any, event: Any, provider_wake_prefix: str):
+        mark_normal_chat(event)
+        async for item in method(stage, event, provider_wake_prefix):
+            yield item
+
+    return process_stage
 
 
 def mark_request(event: Any, req: Any) -> None:
-    """Remember the main chat request that should stop streaming.
+    """Remember a normal chat request and turn streaming off for this turn.
+
+    Streaming must be decided before the model responds. A converted tool send
+    becomes a normal reply, and a streaming finish skips the pre-send hook, so
+    the whole turn is non-streaming once this feature is active.
 
     Args:
         event: Event entering the LLM request hook.
@@ -165,21 +209,25 @@ def extract_plain_send(runner: Any, response: Any) -> str | None:
     args = getattr(response, "tools_call_args", None)
     if not isinstance(names, list) or names != [SEND_MESSAGE_TOOL_NAME]:
         return None
-    if not isinstance(args, list) or len(args) != 1 or not isinstance(args[0], dict):
+    if not isinstance(args, list) or len(args) != 1:
         return None
-    if not _same_session(args[0].get("session"), _current_session(runner)):
+    payload = _as_mapping(args[0])
+    if payload is None:
+        return None
+    if not _same_session(payload.get("session"), _current_session(runner)):
         return None
 
-    messages = args[0].get("messages")
+    messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         return None
     texts: list[str] = []
     for message in messages:
-        if not isinstance(message, dict):
+        item = _as_mapping(message)
+        if item is None:
             return None
-        if str(message.get("type", "")).lower() != "plain":
+        if str(item.get("type", "")).lower() != "plain":
             return None
-        text = str(message.get("text", "")).strip()
+        text = str(item.get("text", "")).strip()
         if not text:
             return None
         texts.append(text)
@@ -277,33 +325,63 @@ def _marked(event: Any) -> bool:
     return callable(get_extra) and get_extra(_NORMAL_CHAT_MARKER) is True
 
 
-def _load_runner_cls() -> type | None:
+def release_stale_patch() -> None:
+    """Drop a patch left behind by a replaced plugin module.
+
+    AstrBot re-executes a plugin module on reload, so this module no longer
+    remembers an install performed by the previous copy. The classes do.
+    """
+    if _installed or _originals:
+        return
+    for module_name, class_name, method_name in _PATCHES:
+        owner = _load_owner(module_name, class_name)
+        if owner is None:
+            continue
+        current = getattr(owner, method_name, None)
+        if not getattr(current, _PATCH_MARKER, False):
+            continue
+        wrapped = getattr(current, "__wrapped__", None)
+        if wrapped is None or getattr(wrapped, _PATCH_MARKER, False):
+            logger.warning(
+                "[OutputEnhance] Could not restore %s.%s after reload.",
+                class_name,
+                method_name,
+            )
+            continue
+        setattr(owner, method_name, wrapped)
+
+
+def _load_owner(module_name: str, class_name: str) -> type | None:
     try:
-        from astrbot.core.agent.runners.tool_loop_agent_runner import (
-            ToolLoopAgentRunner,
-        )
-    except ImportError:
+        module = __import__(module_name, fromlist=[class_name])
+        owner = getattr(module, class_name)
+    except (ImportError, AttributeError):
         logger.warning(
-            "[OutputEnhance] ToolLoopAgentRunner is unavailable; "
-            "plain tool sends will not be converted."
+            "[OutputEnhance] %s is unavailable; plain tool sends will not be converted.",
+            class_name,
         )
         return None
-    return ToolLoopAgentRunner
-
-
-def _load_stage_cls() -> type | None:
-    try:
-        from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
-            InternalAgentSubStage,
-        )
-    except ImportError:
+    if not isinstance(owner, type):
         logger.warning(
-            "[OutputEnhance] InternalAgentSubStage is unavailable; "
-            "plain tool sends will not be converted."
+            "[OutputEnhance] %s is unavailable; plain tool sends will not be converted.",
+            class_name,
         )
         return None
-    return InternalAgentSubStage
+    return owner
 
 
-def _is_async_generator(method: object) -> bool:
-    return inspect.isasyncgenfunction(method)
+def _as_mapping(value: object) -> collections.abc.Mapping | None:
+    """Return a read-only mapping, including Gemini protobuf argument maps."""
+    if isinstance(value, collections.abc.Mapping):
+        return value
+    items = getattr(value, "items", None)
+    if not callable(items):
+        return None
+    try:
+        return dict(items())
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_coroutine(method: object) -> bool:
+    return inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method)

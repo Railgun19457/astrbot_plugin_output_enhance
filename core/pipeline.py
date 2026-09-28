@@ -117,6 +117,8 @@ def prepare_chain(
         Message groups to send in order, and whether image rendering should
         replace the whole text reply. Failures are handled by the caller.
     """
+    # Disable segmentation before parsing so {{SEG}} is removed instead of
+    # becoming a split when this reply is not eligible.
     if not _segment_this_result(event, config):
         config = replace(config, seg_enable=False)
 

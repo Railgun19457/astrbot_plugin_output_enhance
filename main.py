@@ -23,7 +23,7 @@ from .core.pipeline import (
 )
 from .core.renderer import render_text, resolve_font
 from .core.send_tool import install as install_send_tool
-from .core.send_tool import mark_request
+from .core.send_tool import mark_request, release_stale_patch
 from .core.send_tool import uninstall as uninstall_send_tool
 from .core.text_ops import typing_delay
 from .tools.output_tools import build_tools
@@ -71,6 +71,9 @@ class OutputEnhancePlugin(Star):
         self.font_path = self.config.font_path
         self._registered_tools: list[str] = []
         self._send_tool_installed = False
+        # A reloaded module cannot see the previous install. Restore those
+        # methods before deciding whether this copy should patch them again.
+        release_stale_patch()
         if self.config.seg_plain_tool_send:
             self._send_tool_installed = install_send_tool()
         for tool in build_tools(self):
