@@ -130,7 +130,7 @@ async def _download_font(source: str, data_dir: Path, name: str) -> str:
     try:
         await asyncio.to_thread(data_dir.mkdir, parents=True, exist_ok=True)
         await download_file(font_path, str(destination), show_progress=False)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.exception("[OutputEnhance] Failed to download font: %s", font_path)
         return font_path
     return str(destination)
@@ -202,11 +202,13 @@ def _render_pillow(text: str, config: PluginConfig, font_path: str) -> list[str]
     pages: list[list[_LaidBlock]] = [[]]
     used = 0
     for block in laid_out:
-        if config.auto_page and pages[-1] and used + block.height > capacity:
-            pages.append([])
-            used = 0
-        pages[-1].append(block)
-        used += block.height
+        pieces = _split_tall_block(block, capacity) if config.auto_page else [block]
+        for piece in pieces:
+            if pages[-1] and used + piece.height > capacity:
+                pages.append([])
+                used = 0
+            pages[-1].append(piece)
+            used += piece.height
     directory = Path(get_astrbot_temp_path()) / "output_enhance"
     directory.mkdir(parents=True, exist_ok=True)
     paths: list[str] = []
@@ -222,6 +224,34 @@ def _render_pillow(text: str, config: PluginConfig, font_path: str) -> list[str]
         image.convert("RGB").save(path, "PNG")
         paths.append(str(path))
     return paths
+
+
+def _split_tall_block(block: _LaidBlock, capacity: int) -> list[_LaidBlock]:
+    """Split one block that cannot fit on a page without crossing a line.
+
+    Args:
+        block: Wrapped block whose height may exceed one page.
+        capacity: Vertical space available between the page margins.
+
+    Returns:
+        Line-sized pieces for paragraphs, headings, lists, quotes, and code.
+        Tables stay intact because splitting one would cut through a cell.
+    """
+    if block.height <= capacity or not block.lines or block.kind == "table":
+        return [block]
+    step = max(block.height // len(block.lines), 1)
+    per_page = max(capacity // step, 1)
+    pieces: list[_LaidBlock] = []
+    for index in range(0, len(block.lines), per_page):
+        lines = block.lines[index : index + per_page]
+        pieces.append(
+            block._replace(
+                lines=lines,
+                height=step * len(lines),
+                marker=block.marker if index == 0 else "",
+            )
+        )
+    return pieces
 
 
 def _load_template(path: str) -> PillowTemplate:

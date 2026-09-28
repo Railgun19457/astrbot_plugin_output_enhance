@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import (
     At,
@@ -85,23 +86,44 @@ def _build_reply(event: AstrMessageEvent) -> Reply | None:
     )
 
 
-def _message_gap(event: AstrMessageEvent) -> int | None:
-    """Count messages that arrived after the triggering message.
+async def _message_gap(event: AstrMessageEvent) -> int | None:
+    """Count other people's messages stored after the triggering message.
+
+    The current row is AstrBot's persisted history id, not the platform
+    message id. Rows inserted for the bot itself do not count.
+
+    Args:
+        event: Event being replied to.
 
     Returns:
-        The gap when history is available, otherwise None.
+        The number of newer messages from other senders. None when persisted
+        history or the current row is unavailable.
     """
-    history = getattr(event, "platform_message_history", None)
-    current_id = getattr(event.message_obj, "message_id", None)
-    if not isinstance(history, list) or current_id in (None, ""):
+    current_id = event.get_extra("_current_platform_message_history_id")
+    context = getattr(event, "context", None)
+    manager = getattr(context, "message_history_manager", None)
+    if not isinstance(current_id, int) or current_id <= 0 or manager is None:
         return None
-    ids = [getattr(message, "message_id", None) for message in history]
-    if current_id not in ids:
+    try:
+        history = await manager.get(
+            platform_id=event.get_platform_id(),
+            user_id=event.unified_msg_origin,
+            page_size=50,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[OutputEnhance] Failed to read message history.")
         return None
-    return len(ids) - ids.index(current_id) - 1
+    self_id = str(event.get_self_id() or "")
+    return sum(
+        1
+        for record in history
+        if isinstance(getattr(record, "id", None), int)
+        and record.id > current_id
+        and str(getattr(record, "sender_id", "") or "") != self_id
+    )
 
 
-def prepare_chain(
+async def prepare_chain(
     event: AstrMessageEvent,
     chain: list[BaseMessageComponent],
     config: PluginConfig,
@@ -148,12 +170,11 @@ def prepare_chain(
     if config.cleanup_enable and _only_text(converted):
         cleaned = cleanup_text(_plain_text(converted), config)
         if cleaned != _plain_text(converted):
-            preserved = [comp for comp in converted if not isinstance(comp, Plain)]
-            converted = [*preserved, Plain(cleaned)] if cleaned else preserved
+            converted = _restore_cleaned_text(converted, cleaned)
 
     plain = _plain_text(converted)
     has_reply = any(isinstance(comp, Reply) for comp in converted)
-    gap = _message_gap(event)
+    gap = await _message_gap(event)
     if (
         config.quote_enable
         and platform_reply
@@ -165,23 +186,108 @@ def prepare_chain(
     ):
         converted.insert(0, reply)
 
-    if not _only_text(converted) or _exceeds_passive_threshold(plain, config):
-        if explicit_segments and _forward_keeps_segments(converted, config, platform):
-            return _group_segments(converted, config), force_image
+    if explicit_segments:
+        groups = _group_segments(converted, config)
+        # The word threshold only suppresses automatic splitting. An explicit
+        # marker stays split until there are too many messages to send, and
+        # then only a forward can preserve one node per marker.
+        if len(groups) > 1 and (
+            len(groups) <= config.seg_sentences_threshold
+            or (
+                config.forward_enable
+                and supports(platform, "forward")
+                and len(groups) > config.forward_sentences_threshold
+            )
+        ):
+            return groups, force_image
         return [_without_breaks(converted)], force_image
 
-    candidates = _candidate_segments(
-        converted, config, explicit_segments=explicit_segments
-    )
+    if not _only_text(converted) or _exceeds_passive_threshold(plain, config):
+        return [_without_breaks(converted)], force_image
+
+    candidates = _candidate_segments(converted, config)
     if candidates and _within_segment_limits(plain, len(candidates), config):
         return candidates, force_image
     # Too many messages to send separately. Keep the splits only when the
     # forward sentence limit also trips, so each split becomes one node
     # instead of being flattened into a single forward message.
-    if candidates and _forward_keeps_segments(converted, config, platform):
+    if (
+        candidates
+        and config.forward_enable
+        and supports(platform, "forward")
+        and len(candidates) > config.forward_sentences_threshold
+    ):
         return candidates, force_image
 
     return [_without_breaks(converted)], force_image
+
+
+def _restore_cleaned_text(
+    components: list[BaseMessageComponent | SegmentBreak],
+    cleaned: str,
+) -> list[BaseMessageComponent | SegmentBreak]:
+    """Put cleaned plain text back where its original pieces were.
+
+    Args:
+        components: Chain containing the original plain pieces and components
+            that must keep their relative positions.
+        cleaned: Plain text after cleanup removed a span.
+
+    Returns:
+        The chain with each original plain span replaced by the portion of
+        the cleaned text that still occupies it. Mentions, replies, and
+        segment breaks stay in place. A span whose text was entirely removed
+        contributes no plain component.
+    """
+    original = _plain_text(components)
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for comp in components:
+        if isinstance(comp, Plain):
+            spans.append((cursor, cursor + len(comp.text)))
+            cursor += len(comp.text)
+    if len(cleaned) > len(original):
+        return components
+    removals: list[tuple[int, int]] = []
+    cleaned_index = 0
+    start = 0
+    while start < len(original):
+        if cleaned_index < len(cleaned) and original[start] == cleaned[cleaned_index]:
+            cleaned_index += 1
+            start += 1
+            continue
+        end = start + 1
+        while end < len(original) and (
+            cleaned_index >= len(cleaned) or original[end] != cleaned[cleaned_index]
+        ):
+            end += 1
+        removals.append((start, end))
+        start = end
+
+    restored: list[tuple[Plain, str]] = []
+    for comp, span in zip(
+        (comp for comp in components if isinstance(comp, Plain)),
+        spans,
+    ):
+        piece = comp.text
+        for removal_start, removal_end in reversed(removals):
+            start = max(span[0], removal_start) - span[0]
+            end = min(span[1], removal_end) - span[0]
+            if start < end:
+                piece = piece[:start] + piece[end:]
+        if piece:
+            restored.append((comp, piece))
+    pieces = iter(restored)
+
+    converted: list[BaseMessageComponent | SegmentBreak] = []
+    for comp in components:
+        if not isinstance(comp, Plain):
+            converted.append(comp)
+            continue
+        replacement = next(pieces, None)
+        if replacement is not None and replacement[0] is comp:
+            converted.append(Plain(replacement[1]))
+    return converted
 
 
 def _segment_this_result(event: AstrMessageEvent, config: PluginConfig) -> bool:
@@ -207,26 +313,19 @@ def _segment_this_result(event: AstrMessageEvent, config: PluginConfig) -> bool:
 def _candidate_segments(
     components: list[BaseMessageComponent | SegmentBreak],
     config: PluginConfig,
-    *,
-    explicit_segments: bool,
 ) -> list[list[BaseMessageComponent]] | None:
-    """Build the splits a reply would use, before either limit rejects them.
+    """Build automatic sentence splits before either limit rejects them.
 
     Args:
         components: Chain after marker parsing.
         config: Segment switches and split rules.
-        explicit_segments: Whether the model emitted at least one ``{{SEG}}``.
 
     Returns:
-        One group per message, or None when there is nothing to split.
-        Automatic splitting still requires the reply to stay under the word
-        limit; explicit markers are counted even when that limit is exceeded.
+        One group per sentence, or None when the reply is too long or cannot
+        be split. Explicit ``{{SEG}}`` groups are built by the caller.
     """
     if not config.seg_enable:
         return None
-    if explicit_segments:
-        groups = _group_segments(components, config)
-        return groups if len(groups) > 1 else None
 
     plain = _plain_text(components)
     if not plain or len(plain) >= config.seg_words_threshold:
@@ -243,30 +342,6 @@ def _within_segment_limits(text: str, count: int, config: PluginConfig) -> bool:
     return (
         len(text) < config.seg_words_threshold
         and count <= config.seg_sentences_threshold
-    )
-
-
-def _forward_keeps_segments(
-    components: list[BaseMessageComponent | SegmentBreak],
-    config: PluginConfig,
-    platform: str,
-) -> bool:
-    """Keep rejected splits when forwarding would otherwise flatten them.
-
-    Args:
-        components: Chain that may still contain internal segment breaks.
-        config: Forward switch and sentence threshold.
-        platform: Current platform type.
-
-    Returns:
-        True when the platform can forward and the number of explicit splits
-        is above the forward sentence threshold.
-    """
-    if not config.forward_enable or not supports(platform, "forward"):
-        return False
-    return (
-        sum(isinstance(comp, SegmentBreak) for comp in components) + 1
-        > config.forward_sentences_threshold
     )
 
 

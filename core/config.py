@@ -79,44 +79,73 @@ def _as_bool(value: object, fallback: bool) -> bool:
 class PluginConfig:
     """Normalized plugin settings used by the output pipeline."""
 
-    llm_tool_options: set[str] = field(default_factory=set)
+    llm_tool_options: set[str] = field(
+        default_factory=lambda: {"send_forward_message", "send_text_as_image"}
+    )
 
     prompt_enable: bool = True
     prompt_custom: str = ""
 
     plain_tool_send: bool = False
 
-    seg_enable: bool = False
+    seg_enable: bool = True
     seg_plugin_messages: bool = False
     seg_words_threshold: int = 150
     seg_sentences_threshold: int = 8
-    seg_split_chars: list[str] = field(default_factory=list)
-    seg_pair_symbols: list[str] = field(default_factory=list)
-    seg_typing_speed: float = 8.0
+    seg_split_chars: list[str] = field(
+        default_factory=lambda: ["。", "？", "！", "……", "~", "\n"]
+    )
+    seg_pair_symbols: list[str] = field(
+        default_factory=lambda: [
+            '""',
+            "''",
+            "（）",
+            "()",
+            "【】",
+            "[]",
+            "{}",
+            "《》",
+            "「」",
+            "『』",
+            "“”",
+            "‘’",
+        ]
+    )
+    seg_typing_speed: float = 30.0
     seg_trim_head_chars: list[str] = field(default_factory=list)
-    seg_trim_chars: list[str] = field(default_factory=list)
+    seg_trim_chars: list[str] = field(
+        default_factory=lambda: ["。", "，", "；", "、", ",", ".", ";"]
+    )
 
     quote_enable: bool = True
-    auto_quote_interval: int = 0
+    auto_quote_interval: int = 2
 
     at_enable: bool = True
     allow_at_all: bool = False
 
-    forward_enable: bool = False
-    forward_text_threshold: int = 500
+    forward_enable: bool = True
+    forward_text_threshold: int = 300
     forward_sentences_threshold: int = 10
     default_nickname: str = "AstrBot"
 
     t2i_enable: bool = False
     t2i_text_threshold: int = 1000
     t2i_renderer: str = "pillow"
-    pillow_template: str = ""
-    font_path: str = ""
-    emoji_font_path: str = ""
+    pillow_template: str = "templates/light.json"
+    font_path: str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
+    emoji_font_path: str = "https://cdn.jsdelivr.net/gh/googlefonts/noto-emoji@main/2D/fonts/NotoColorEmoji.ttf"
     auto_page: bool = True
 
     error_enable: bool = True
-    error_keywords: list[str] = field(default_factory=list)
+    error_keywords: list[str] = field(
+        default_factory=lambda: [
+            "Traceback (most recent call last)",
+            "Error occurred while processing agent request",
+            "在调用插件",
+            "LLM 请求失败",
+            "API 调用失败",
+        ]
+    )
     plugin_error: bool = True
     user_notice: str = ""
     forward_sessions: list[str] = field(default_factory=list)
@@ -126,7 +155,9 @@ class PluginConfig:
 
     cleanup_enable: bool = False
     cleanup_max_length: int = 200
-    cleanup_pair_symbols: list[str] = field(default_factory=list)
+    cleanup_pair_symbols: list[str] = field(
+        default_factory=lambda: ["[text]", "(text)", "（text）", "【text】", "&&text&&"]
+    )
     cleanup_regex: list[str] = field(default_factory=list)
 
     def injection_text(self) -> str:

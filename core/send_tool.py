@@ -134,11 +134,12 @@ def _wrap_responses(method: Any):
             rewritten = rewrite_plain_send(runner, response)
             if rewritten is not response:
                 spoken = _spoken_text(response)
+                # The rewritten response carries this text, so AstrBot records
+                # it when the assistant turn completes. Recording it here too
+                # stores the same message twice.
                 if spoken and not await _send_extracted_text(runner, spoken):
                     yield response
                     continue
-                if spoken:
-                    _record_delivered_text(runner, spoken)
             yield rewritten
 
     return iter_responses
@@ -157,8 +158,6 @@ def _wrap_requery(method: Any):
         spoken = _spoken_text(result[0])
         if spoken and not await _send_extracted_text(runner, spoken):
             return result
-        if spoken:
-            _record_delivered_text(runner, spoken)
         return (rewritten, *result[1:])
 
     return resolve_tool_exec

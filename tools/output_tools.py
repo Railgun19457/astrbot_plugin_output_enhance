@@ -275,7 +275,7 @@ async def _image_roots(origin: str) -> tuple[Path, ...]:
     if origin:
         try:
             workspace = await resolve_workspace_root_for_umo(origin)
-        except Exception:
+        except Exception:  # noqa: BLE001
             workspace = default_workspace_root(origin)
         roots.insert(0, workspace.resolve(strict=False))
     return tuple(roots)

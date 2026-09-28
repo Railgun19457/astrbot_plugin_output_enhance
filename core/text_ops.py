@@ -21,12 +21,16 @@ def _pair_spans(text: str, symbols: list[str]) -> list[tuple[int, int]]:
     for symbol in symbols:
         if len(symbol) < 2:
             continue
-        if symbol[0] == symbol[-1]:
-            char = re.escape(symbol[0])
-            pattern = re.compile(char + r".*?" + char, re.DOTALL)
-        else:
-            left, right = symbol[0], symbol[-1]
-            pattern = re.compile(re.escape(left) + r".*?" + re.escape(right), re.DOTALL)
+        left, right = symbol[0], symbol[-1]
+        if left == right:
+            positions = [index for index, char in enumerate(text) if char == left]
+            spans.extend(
+                (positions[index], positions[index + 1] + 1)
+                for index in range(0, len(positions) - 1, 2)
+                if "\n" not in text[positions[index] : positions[index + 1]]
+            )
+            continue
+        pattern = re.compile(re.escape(left) + r".*?" + re.escape(right), re.DOTALL)
         spans.extend(match.span() for match in pattern.finditer(text))
     return spans
 
@@ -73,7 +77,7 @@ def split_sentences(text: str, config: PluginConfig) -> list[str]:
     pieces: list[str] = []
     start = 0
     for match in pattern.finditer(text):
-        if _inside(match.start(), protected):
+        if _inside(match.end(), protected):
             continue
         piece = trim_segment(
             text[start : match.end()],

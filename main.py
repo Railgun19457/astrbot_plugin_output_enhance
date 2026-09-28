@@ -71,6 +71,7 @@ class OutputEnhancePlugin(Star):
         self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)
         self.font_path = self.config.font_path
         self._registered_tools: list[str] = []
+        self._segment_tasks: set[asyncio.Task] = set()
         self._send_tool_installed = False
         # A reloaded module cannot see the previous install. Restore those
         # methods before deciding whether this copy should patch them again.
@@ -95,7 +96,9 @@ class OutputEnhancePlugin(Star):
             )
 
     async def terminate(self) -> None:
-        """Drop tools registered by this plugin."""
+        """Drop tools and unfinished segment sends owned by this plugin."""
+        for task in list(self._segment_tasks):
+            task.cancel()
         if self._send_tool_installed:
             bind_text_sender(None)
             uninstall_send_tool()
@@ -131,8 +134,8 @@ class OutputEnhancePlugin(Star):
 
         original = list(result.chain)
         try:
-            groups, force_image = prepare_chain(event, original, self.config)
-        except Exception:
+            groups, force_image = await prepare_chain(event, original, self.config)
+        except Exception:  # noqa: BLE001
             logger.exception("[OutputEnhance] Failed to prepare the reply.")
             return
         chain = [comp for group in groups for comp in group]
@@ -164,7 +167,7 @@ class OutputEnhancePlugin(Star):
                 segments = groups if len(groups) > 1 else [chain]
                 result.chain = to_nodes(segments, self.config.default_nickname)
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception(
                 "[OutputEnhance] Passive formatting failed; sending the original text."
             )
@@ -172,7 +175,11 @@ class OutputEnhancePlugin(Star):
             return
 
         if len(groups) > 1:
-            asyncio.get_running_loop().create_task(self._send_segments(event, groups))
+            task = asyncio.get_running_loop().create_task(
+                self._send_segments(event, groups)
+            )
+            self._segment_tasks.add(task)
+            task.add_done_callback(self._segment_tasks.discard)
             event.clear_result()
             return
         result.chain = chain
@@ -193,24 +200,37 @@ class OutputEnhancePlugin(Star):
             f"插件 {plugin_name} 的处理函数 {handler_name} 出现异常：{error}\n\n"
             f"{traceback_text}"
         )
-        await self._intercept(event, detail)
+        await self._intercept(event, detail, stop_event=True)
 
-    async def _intercept(self, event: AstrMessageEvent, detail: str) -> None:
+    async def _intercept(
+        self,
+        event: AstrMessageEvent,
+        detail: str,
+        *,
+        stop_event: bool = False,
+    ) -> None:
         """Drop the original reply, optionally notice the user, and forward it.
 
-        The event itself is not stopped. Decoration runs while the agent stage
-        is waiting at a yield; stopping here would skip ``astr_agent_complete``
-        and the conversation-history write.
+        Args:
+            event: Event whose original reply is being replaced.
+            detail: Full text forwarded to the configured sessions.
+            stop_event: Whether AstrBot must not continue the current handler.
+                Keyword interception runs during result decoration and must
+                leave the event running so the agent can finish its history
+                write. Plugin-error interception happens before AstrBot builds
+                its own traceback reply, so that path stops the event.
         """
         logger.info("[OutputEnhance] Reply intercepted.")
         event.clear_result()
+        if stop_event:
+            event.stop_event()
         notice = self.config.user_notice.strip()
         if notice:
             await event.send(MessageChain([Plain(notice)]))
         for session in self.config.forward_sessions:
             try:
                 await self.context.send_message(session, MessageChain([Plain(detail)]))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception(
                     "[OutputEnhance] Failed to forward the intercepted error to %s.",
                     session,
@@ -227,7 +247,7 @@ class OutputEnhancePlugin(Star):
             True when the processed text is handed to the sender.
         """
         try:
-            groups, _ = prepare_chain(
+            groups, _ = await prepare_chain(
                 event,
                 [Plain(text)],
                 replace(self.config, seg_plugin_messages=True),
@@ -257,7 +277,10 @@ class OutputEnhancePlugin(Star):
         """
         for group in groups:
             text = "".join(comp.text for comp in group if isinstance(comp, Plain))
-            await asyncio.sleep(typing_delay(text, self.config.seg_typing_speed))
+            try:
+                await asyncio.sleep(typing_delay(text, self.config.seg_typing_speed))
+            except asyncio.CancelledError:
+                return
             if group:
                 await event.send(MessageChain(group))
 
@@ -284,12 +307,33 @@ class OutputEnhancePlugin(Star):
             for feature, path, setting in _CONFLICTS
             if enabled[feature] and _config_enabled(astrbot_config, path)
         ]
+        platform = astrbot_config.get("platform_settings", {})
+        if not isinstance(platform, dict):
+            platform = {}
+        threshold = _config_value(
+            astrbot_config, ("platform_settings", "forward_threshold")
+        )
+        if self.config.forward_enable and threshold != 0:
+            conflicts.append("platform_settings.forward_threshold")
+        if self.config.at_enable and platform.get("reply_with_mention"):
+            conflicts.append("platform_settings.reply_with_mention")
+        if platform.get("reply_prefix"):
+            conflicts.append("platform_settings.reply_prefix")
         if conflicts:
             logger.warning(
                 "[OutputEnhance] AstrBot settings still enabled and may run before "
                 "or duplicate this plugin: %s. Turn them off in WebUI.",
                 ", ".join(conflicts),
             )
+
+
+def _config_value(config: object, path: tuple[str, ...]) -> object:
+    current = config
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
 
 
 def _config_enabled(config: object, path: tuple[str, ...]) -> bool:
