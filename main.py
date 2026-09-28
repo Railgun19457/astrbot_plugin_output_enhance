@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from astrbot.api import logger
@@ -226,7 +227,11 @@ class OutputEnhancePlugin(Star):
             True when the processed text is handed to the sender.
         """
         try:
-            groups, _ = prepare_chain(event, [Plain(text)], self.config)
+            groups, _ = prepare_chain(
+                event,
+                [Plain(text)],
+                replace(self.config, seg_plugin_messages=True),
+            )
         except Exception:  # noqa: BLE001
             logger.exception("[OutputEnhance] Failed to prepare extracted tool text.")
             return False
