@@ -1,5 +1,5 @@
 name: astrbot_plugin_output_enhance
-display_name: 输出增强
+display_name: BOT输出增强
 desc: 让Bot能够发送@、引用消息、合并转发消息、主动分段和转图片
 short_desc: 增强 Bot 的输出表现
 version: v0.1.13
