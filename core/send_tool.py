@@ -85,8 +85,10 @@ def install() -> bool:
         else:
             wrapped = _wrap_stage(method)
         # Keep the captured method reachable after this module is replaced
-        # by a plugin reload.
+        # by a plugin reload. Set it after update_wrapper so a copied
+        # __dict__ cannot point __wrapped__ at an older layer.
         functools.update_wrapper(wrapped, method)
+        wrapped.__wrapped__ = method
         setattr(wrapped, _PATCH_MARKER, True)
         setattr(owner, method_name, wrapped)
 
@@ -253,27 +255,74 @@ def mark_normal_chat(event: Any) -> None:
 
 
 def _assistant_response(response: Any, text: str) -> Any:
+    """Rebuild a tool response as assistant text.
+
+    ``LLMResponse`` reads ``completion_text`` from its result chain whenever
+    that chain exists, including an empty one. Gemini creates the empty chain
+    before the tool call is known, so passing either the old chain or the text
+    into the constructor drops the converted reply.
+
+    Args:
+        response: Model response being replaced.
+        text: Plain text that should become the user-visible reply.
+
+    Returns:
+        The rebuilt response, or the original when its text would not survive.
+    """
     try:
-        return type(response)(
-            role="assistant",
-            completion_text=text,
-            result_chain=None,
-            tools_call_args=[],
-            tools_call_name=[],
-            tools_call_ids=[],
-            tools_call_extra_content={},
-            reasoning_content=getattr(response, "reasoning_content", None),
-            reasoning_signature=getattr(response, "reasoning_signature", None),
-            raw_completion=getattr(response, "raw_completion", None),
-            is_chunk=False,
-            id=getattr(response, "id", None),
-            usage=getattr(response, "usage", None),
-        )
-    except (TypeError, ValueError):
+        rebuilt = type(response)(role="assistant")
+        # Dataclass __init__ assigns its own defaults after this returns, so
+        # every field must be written once construction has finished.
+        if hasattr(rebuilt, "result_chain"):
+            rebuilt.result_chain = None
+        rebuilt.tools_call_args = []
+        rebuilt.tools_call_name = []
+        rebuilt.tools_call_ids = []
+        rebuilt.tools_call_extra_content = {}
+        rebuilt.reasoning_content = getattr(response, "reasoning_content", None)
+        rebuilt.reasoning_signature = getattr(response, "reasoning_signature", None)
+        rebuilt.raw_completion = getattr(response, "raw_completion", None)
+        rebuilt.is_chunk = False
+        rebuilt.id = getattr(response, "id", None)
+        rebuilt.usage = getattr(response, "usage", None)
+        rebuilt.completion_text = text
+    except (AttributeError, TypeError, ValueError):
         logger.exception(
             "[OutputEnhance] Could not rebuild the model response; keeping the tool call."
         )
         return response
+    if not _keeps_text(rebuilt, text):
+        logger.error(
+            "[OutputEnhance] Rebuilt model response dropped the reply text; keeping the tool call."
+        )
+        return response
+    return rebuilt
+
+
+def _keeps_text(response: Any, text: str) -> bool:
+    """Return whether the rebuilt response still exposes the converted text.
+
+    An empty result chain is true for ``LLMResponse``. Its text setter then
+    inserts a text component into that chain, so the chain must be ignored
+    while reading the stored text.
+
+    Args:
+        response: Rebuilt model response.
+        text: Text the conversion intended to keep.
+
+    Returns:
+        True when either the stored text or the chain text matches exactly.
+    """
+    chain = getattr(response, "result_chain", None)
+    if hasattr(response, "result_chain"):
+        response.result_chain = None
+    stored = str(getattr(response, "completion_text", "") or "")
+    if hasattr(response, "result_chain"):
+        response.result_chain = chain
+    if stored == text:
+        return True
+    get_plain_text = getattr(chain, "get_plain_text", None)
+    return callable(get_plain_text) and str(get_plain_text() or "") == text
 
 
 def _skipped_runner(runner: Any) -> bool:
@@ -338,17 +387,20 @@ def release_stale_patch() -> None:
         if owner is None:
             continue
         current = getattr(owner, method_name, None)
-        if not getattr(current, _PATCH_MARKER, False):
-            continue
-        wrapped = getattr(current, "__wrapped__", None)
-        if wrapped is None or getattr(wrapped, _PATCH_MARKER, False):
-            logger.warning(
-                "[OutputEnhance] Could not restore %s.%s after reload.",
-                class_name,
-                method_name,
-            )
-            continue
-        setattr(owner, method_name, wrapped)
+        restored = current
+        while getattr(restored, _PATCH_MARKER, False):
+            wrapped = getattr(restored, "__wrapped__", None)
+            if wrapped is None or wrapped is restored:
+                logger.warning(
+                    "[OutputEnhance] Could not restore %s.%s after reload.",
+                    class_name,
+                    method_name,
+                )
+                restored = None
+                break
+            restored = wrapped
+        if restored is not None and restored is not current:
+            setattr(owner, method_name, restored)
 
 
 def _load_owner(module_name: str, class_name: str) -> type | None:
