@@ -22,6 +22,9 @@ from .core.pipeline import (
     to_nodes,
 )
 from .core.renderer import render_text, resolve_font
+from .core.send_tool import install as install_send_tool
+from .core.send_tool import mark_request
+from .core.send_tool import uninstall as uninstall_send_tool
 from .core.text_ops import typing_delay
 from .tools.output_tools import build_tools
 
@@ -67,6 +70,9 @@ class OutputEnhancePlugin(Star):
         self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)
         self.font_path = self.config.font_path
         self._registered_tools: list[str] = []
+        self._send_tool_installed = False
+        if self.config.seg_plain_tool_send:
+            self._send_tool_installed = install_send_tool()
         for tool in build_tools(self):
             self.context.add_llm_tools(tool)
             self._registered_tools.append(tool.name)
@@ -85,6 +91,9 @@ class OutputEnhancePlugin(Star):
 
     async def terminate(self) -> None:
         """Drop tools registered by this plugin."""
+        if self._send_tool_installed:
+            uninstall_send_tool()
+            self._send_tool_installed = False
         for name in self._registered_tools:
             self.context.unregister_llm_tool(name)
         self._registered_tools.clear()
@@ -94,6 +103,8 @@ class OutputEnhancePlugin(Star):
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         """Append the static marker instructions to the system prompt."""
+        if self.config.seg_plain_tool_send:
+            mark_request(event, req)
         prompt = self.config.injection_text()
         if not prompt:
             return

@@ -51,6 +51,12 @@
         "hint": "关闭时只对模型回复分段。其他插件产生的消息不自动切分，其中的 {{SEG}} 也会被移除。",
         "default": false
       },
+      "plain_tool_send": {
+        "type": "bool",
+        "description": "接管纯文本工具发送",
+        "hint": "开启后，普通聊天中模型单独调用 send_message_to_user 发送当前会话纯文本时，改成普通回复，从而经过分段、转发和转图片。为此会关闭本轮流式输出。跨会话、定时任务、直播、图片、文件、语音、视频、@ 和与其他工具混用的调用仍走原工具。",
+        "default": false
+      },
       "words_threshold": {
         "type": "int",
         "description": "分段阈值字数",
