@@ -84,9 +84,10 @@ class PluginConfig:
     prompt_enable: bool = True
     prompt_custom: str = ""
 
+    plain_tool_send: bool = False
+
     seg_enable: bool = False
     seg_plugin_messages: bool = False
-    seg_plain_tool_send: bool = False
     seg_words_threshold: int = 150
     seg_sentences_threshold: int = 8
     seg_split_chars: list[str] = field(default_factory=list)
@@ -239,9 +240,9 @@ def load_config(raw: dict[str, Any] | None) -> PluginConfig:
         llm_tool_options=tool_options,
         prompt_enable=_as_bool(prompt.get("enable"), True),
         prompt_custom=str(prompt.get("prompt") or ""),
+        plain_tool_send=_as_bool(data.get("plain_tool_send"), False),
         seg_enable=_as_bool(segmented.get("enable"), True),
         seg_plugin_messages=_as_bool(segmented.get("plugin_messages"), False),
-        seg_plain_tool_send=_as_bool(segmented.get("plain_tool_send"), False),
         seg_words_threshold=_as_int(segmented.get("words_threshold"), 150, 1),
         seg_sentences_threshold=_as_int(segmented.get("sentences_threshold"), 8, 1),
         seg_split_chars=_as_str_list(

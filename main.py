@@ -74,7 +74,7 @@ class OutputEnhancePlugin(Star):
         # A reloaded module cannot see the previous install. Restore those
         # methods before deciding whether this copy should patch them again.
         release_stale_patch()
-        if self.config.seg_plain_tool_send:
+        if self.config.plain_tool_send:
             self._send_tool_installed = install_send_tool()
         for tool in build_tools(self):
             self.context.add_llm_tools(tool)
@@ -106,7 +106,7 @@ class OutputEnhancePlugin(Star):
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         """Append the static marker instructions to the system prompt."""
-        if self.config.seg_plain_tool_send:
+        if self.config.plain_tool_send:
             mark_request(event, req)
         prompt = self.config.injection_text()
         if not prompt:
