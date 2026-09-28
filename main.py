@@ -22,8 +22,8 @@ from .core.pipeline import (
     to_nodes,
 )
 from .core.renderer import render_text, resolve_font
+from .core.send_tool import bind_text_sender, mark_request, release_stale_patch
 from .core.send_tool import install as install_send_tool
-from .core.send_tool import mark_request, release_stale_patch
 from .core.send_tool import uninstall as uninstall_send_tool
 from .core.text_ops import typing_delay
 from .tools.output_tools import build_tools
@@ -75,6 +75,7 @@ class OutputEnhancePlugin(Star):
         # methods before deciding whether this copy should patch them again.
         release_stale_patch()
         if self.config.plain_tool_send:
+            bind_text_sender(self._send_extracted_text)
             self._send_tool_installed = install_send_tool()
         for tool in build_tools(self):
             self.context.add_llm_tools(tool)
@@ -95,6 +96,7 @@ class OutputEnhancePlugin(Star):
     async def terminate(self) -> None:
         """Drop tools registered by this plugin."""
         if self._send_tool_installed:
+            bind_text_sender(None)
             uninstall_send_tool()
             self._send_tool_installed = False
         for name in self._registered_tools:
@@ -212,6 +214,34 @@ class OutputEnhancePlugin(Star):
                     "[OutputEnhance] Failed to forward the intercepted error to %s.",
                     session,
                 )
+
+    async def _send_extracted_text(self, event: AstrMessageEvent, text: str) -> bool:
+        """Format one extracted tool-text run and send it.
+
+        Args:
+            event: Event whose session receives the text.
+            text: Plain text removed from a mixed tool call.
+
+        Returns:
+            True when the processed text is handed to the sender.
+        """
+        try:
+            groups, _ = prepare_chain(event, [Plain(text)], self.config)
+        except Exception:  # noqa: BLE001
+            logger.exception("[OutputEnhance] Failed to prepare extracted tool text.")
+            return False
+        groups = [group for group in groups if group]
+        if not groups:
+            return True
+        try:
+            if len(groups) > 1:
+                await self._send_segments(event, groups)
+            else:
+                await event.send(MessageChain(groups[0]))
+        except Exception:  # noqa: BLE001
+            logger.exception("[OutputEnhance] Failed to send extracted tool text.")
+            return False
+        return True
 
     async def _send_segments(self, event: AstrMessageEvent, groups: list[list]) -> None:
         """Send each segment after a typing delay.

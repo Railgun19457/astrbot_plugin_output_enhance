@@ -26,6 +26,11 @@ _PATCHES = (
         "_resolve_tool_exec",
     ),
     (
+        "astrbot.core.agent.runners.tool_loop_agent_runner",
+        "ToolLoopAgentRunner",
+        "_handle_function_tools",
+    ),
+    (
         "astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal",
         "InternalAgentSubStage",
         "process",
@@ -39,6 +44,17 @@ _PATCHES = (
 
 _installed = False
 _originals: dict[tuple[type, str], Any] = {}
+_text_sender: Any = None
+
+
+def bind_text_sender(sender: Any) -> None:
+    """Register the plugin method that formats extracted tool text.
+
+    Args:
+        sender: Async callable taking the event and text, or None on unload.
+    """
+    global _text_sender
+    _text_sender = sender
 
 
 def install() -> bool:
@@ -82,6 +98,8 @@ def install() -> bool:
             wrapped = _wrap_responses(method)
         elif method_name == "_resolve_tool_exec":
             wrapped = _wrap_requery(method)
+        elif method_name == "_handle_function_tools":
+            wrapped = _wrap_tool_loop(method)
         else:
             wrapped = _wrap_stage(method)
         # Keep the captured method reachable after this module is replaced
@@ -133,6 +151,27 @@ def _wrap_requery(method: Any):
     return resolve_tool_exec
 
 
+def _wrap_tool_loop(method: Any):
+    async def handle_tools(runner: Any, req: Any, response: Any):
+        # Media must stay in its original slot. Plain runs are sent by this
+        # plugin at the same position and removed only after that succeeds.
+        pending = _extract_mixed_runs(runner, response)
+        call_index = 0
+        delivered: list[str] = []
+        try:
+            async for item in method(runner, req, response):
+                if _is_tool_start(item):
+                    await _deliver_pending_run(
+                        runner, response, pending, call_index, delivered
+                    )
+                    call_index += 1
+                yield item
+        finally:
+            await _finish_pending_runs(runner, response, pending, delivered)
+
+    return handle_tools
+
+
 def _wrap_stage(method: Any):
     async def process_stage(stage: Any, event: Any, provider_wake_prefix: str):
         mark_normal_chat(event)
@@ -165,6 +204,231 @@ def mark_request(event: Any, req: Any) -> None:
         set_extra("enable_streaming", False)
 
 
+def _extract_mixed_runs(runner: Any, response: Any) -> list[dict[str, Any]]:
+    """Remove plain runs from current-session sends that also carry media.
+
+    Args:
+        runner: Agent runner carrying the current event and request.
+        response: Completed response whose tools are about to execute.
+
+    Returns:
+        Runs in tool order. Each run remembers the media index it preceded,
+        or None when it belongs after every remaining component.
+    """
+    if not _can_split_response(runner, response):
+        return []
+    names = getattr(response, "tools_call_name", None)
+    args = getattr(response, "tools_call_args", None)
+    if not isinstance(names, list) or not isinstance(args, list):
+        return []
+    runs: list[dict[str, Any]] = []
+    media_index = 0
+    for name, payload in zip(names, args):
+        if name != SEND_MESSAGE_TOOL_NAME or not isinstance(payload, dict):
+            media_index += 1
+            continue
+        if not _same_session(payload.get("session"), _current_session(runner)):
+            media_index += 1
+            continue
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            media_index += 1
+            continue
+        if not any(not _plain_item(item) for item in messages):
+            media_index += 1
+            continue
+        call_runs: list[dict[str, Any]] = []
+        kept: list[object] = []
+        current: list[str] = []
+
+        def close_run(
+            before: int | None,
+            parts: list[str] = current,
+            target: dict = payload,
+            collected: list[dict[str, Any]] = call_runs,
+        ) -> None:
+            if parts:
+                collected.append(
+                    {
+                        "text": "\n".join(parts),
+                        "before": before,
+                        "payload": target,
+                    }
+                )
+                parts.clear()
+
+        for message in messages:
+            item = _as_mapping(message)
+            text = ""
+            if item is not None and str(item.get("type", "")).lower() == "plain":
+                text = str(item.get("text", "")).strip()
+            if text:
+                current.append(text)
+                continue
+            close_run(media_index)
+            kept.append(message)
+            media_index += 1
+        close_run(None)
+        payload["messages"] = kept
+        runs.extend(call_runs)
+    return runs
+
+
+def _plain_item(message: object) -> bool:
+    """Return whether one tool message is non-empty plain text.
+
+    Args:
+        message: One entry from a ``send_message_to_user`` messages array.
+
+    Returns:
+        True when removing it would leave no media behind.
+    """
+    item = _as_mapping(message)
+    return (
+        item is not None
+        and str(item.get("type", "")).lower() == "plain"
+        and bool(str(item.get("text", "")).strip())
+    )
+
+
+def _is_tool_start(item: Any) -> bool:
+    """Return whether one tool execution is about to start.
+
+    Args:
+        item: One value yielded by AstrBot's tool execution loop.
+
+    Returns:
+        True for the progress message emitted before a tool handler runs.
+    """
+    chain = getattr(item, "message_chain", None)
+    return (
+        getattr(item, "kind", None) == "message_chain"
+        and getattr(chain, "type", None) == "tool_call"
+    )
+
+
+def _can_split_response(runner: Any, response: Any) -> bool:
+    """Return whether plain text in this response may leave its tool call.
+
+    Args:
+        runner: Agent runner carrying the current event and request.
+        response: Completed model response whose tools are about to run.
+
+    Returns:
+        False for incomplete responses, skipped chats, and responses that
+        contain anything other than text outside the tool call.
+    """
+    return (
+        not getattr(response, "is_chunk", False)
+        and not _skipped_runner(runner)
+        and _spoken_text(response) is not None
+    )
+
+
+async def _deliver_pending_run(
+    runner: Any,
+    response: Any,
+    pending: list[dict[str, Any]],
+    call_index: int,
+    delivered: list[str],
+) -> None:
+    """Send runs that belong before the tool call which just finished.
+
+    Args:
+        runner: Agent runner whose event receives the text.
+        response: Model response whose tool arguments can receive failures.
+        pending: Runs that have not yet been sent or restored.
+        call_index: Zero-based index of the tool execution that just finished.
+        delivered: Texts accepted for the conversation history.
+    """
+    ready = [run for run in pending if run.get("before") == call_index]
+    for run in ready:
+        pending.remove(run)
+        text = str(run.get("text", ""))
+        if await _send_extracted_text(runner, text):
+            delivered.append(text)
+            continue
+        _restore_run(run)
+
+
+async def _finish_pending_runs(
+    runner: Any,
+    response: Any,
+    pending: list[dict[str, Any]],
+    delivered: list[str],
+) -> None:
+    """Send trailing runs and record everything accepted by the sender.
+
+    Args:
+        runner: Agent runner whose messages are persisted as history.
+        response: Model response containing the remaining tool arguments.
+        pending: Runs left after all tool executions.
+        delivered: Texts already accepted. Trailing successes are appended.
+    """
+    for run in list(pending):
+        pending.remove(run)
+        text = str(run.get("text", ""))
+        if await _send_extracted_text(runner, text):
+            delivered.append(text)
+        else:
+            _restore_run(run)
+    if delivered:
+        _record_delivered_text(runner, "\n".join(delivered))
+
+
+async def _send_extracted_text(runner: Any, text: str) -> bool:
+    """Send extracted text through the current event.
+
+    Args:
+        runner: Agent runner carrying the event.
+        text: One contiguous plain-text run.
+
+    Returns:
+        True when the event sender accepts the message.
+    """
+    event = _runner_event(runner)
+    if not text or event is None or not callable(_text_sender):
+        return False
+    try:
+        return bool(await _text_sender(event, text))
+    except Exception:  # noqa: BLE001
+        logger.exception("[OutputEnhance] Failed to send extracted tool text.")
+        return False
+
+
+def _restore_run(run: dict[str, Any]) -> None:
+    """Put one unsent run back into the tool call it came from.
+
+    Args:
+        run: Extracted text and the payload that originally contained it.
+    """
+    payload = run.get("payload")
+    if not isinstance(payload, dict):
+        return
+    messages = payload.setdefault("messages", [])
+    if isinstance(messages, list):
+        messages.append({"type": "plain", "text": str(run.get("text", ""))})
+
+
+def _record_delivered_text(runner: Any, text: str) -> None:
+    """Append delivered text to the assistant turn stored by AstrBot.
+
+    Args:
+        runner: Agent runner whose context becomes conversation history.
+        text: Text already sent by the plugin.
+    """
+    messages = getattr(getattr(runner, "run_context", None), "messages", None)
+    if not isinstance(messages, list) or not text:
+        return
+    try:
+        from astrbot.core.agent.message import Message, TextPart
+
+        record = Message(role="assistant", content=[TextPart(text=text)])
+    except (ImportError, TypeError, ValueError):
+        record = {"role": "assistant", "content": text}
+    messages.append(record)
+
+
 def rewrite_plain_send(runner: Any, response: Any) -> Any:
     """Replace one plain current-session tool send with assistant text.
 
@@ -173,8 +437,8 @@ def rewrite_plain_send(runner: Any, response: Any) -> Any:
         response: One model response, including streaming chunks.
 
     Returns:
-        The original response, or a copied assistant response whose only
-        content is the joined plain text.
+        The original response, or a copied assistant response. Text attached
+        to the same response comes before the tool text.
     """
     text = extract_plain_send(runner, response)
     if text is None:
@@ -190,23 +454,25 @@ def rewrite_plain_send(runner: Any, response: Any) -> Any:
 def extract_plain_send(runner: Any, response: Any) -> str | None:
     """Return text only when this one call can safely become a normal reply.
 
+    Text attached to the same response is kept before the tool text. Images or
+    other components in that response cannot join the plain reply, so those
+    calls stay tool calls.
+
     Args:
         runner: Agent runner carrying the current event and request.
         response: Completed model response to inspect.
 
     Returns:
-        Joined plain-text parts, or None when the call must stay a tool call.
+        Assistant text followed by the tool text, or None when the call must
+        stay a tool call.
     """
     if getattr(response, "is_chunk", False):
         return None
-    if str(getattr(response, "completion_text", "") or "").strip():
-        return None
-    chain = getattr(getattr(response, "result_chain", None), "chain", None)
-    if isinstance(chain, list) and chain:
-        return None
     if _skipped_runner(runner):
         return None
-
+    spoken = _spoken_text(response)
+    if spoken is None:
+        return None
     names = getattr(response, "tools_call_name", None)
     args = getattr(response, "tools_call_args", None)
     if not isinstance(names, list) or names != [SEND_MESSAGE_TOOL_NAME]:
@@ -233,7 +499,32 @@ def extract_plain_send(runner: Any, response: Any) -> str | None:
         if not text:
             return None
         texts.append(text)
-    return "\n".join(texts)
+    tool_text = "\n".join(texts)
+    if not spoken:
+        return tool_text
+    return f"{spoken}\n{tool_text}"
+
+
+def _spoken_text(response: Any) -> str | None:
+    """Return plain text attached to a tool response.
+
+    Args:
+        response: Completed model response.
+
+    Returns:
+        The stripped text, an empty string when the response has no content,
+        or None when its chain contains anything other than text.
+    """
+    chain = getattr(response, "result_chain", None)
+    components = getattr(chain, "chain", None)
+    if isinstance(components, list) and components:
+        texts: list[str] = []
+        for component in components:
+            if type(component).__name__ != "Plain":
+                return None
+            texts.append(str(getattr(component, "text", "")))
+        return "".join(texts).strip()
+    return str(getattr(response, "completion_text", "") or "").strip()
 
 
 def mark_normal_chat(event: Any) -> None:
