@@ -131,7 +131,15 @@ def uninstall() -> None:
 def _wrap_responses(method: Any):
     async def iter_responses(runner: Any):
         async for response in method(runner):
-            yield rewrite_plain_send(runner, response)
+            rewritten = rewrite_plain_send(runner, response)
+            if rewritten is not response:
+                spoken = _spoken_text(response)
+                if spoken and not await _send_extracted_text(runner, spoken):
+                    yield response
+                    continue
+                if spoken:
+                    _record_delivered_text(runner, spoken)
+            yield rewritten
 
     return iter_responses
 
@@ -146,6 +154,11 @@ def _wrap_requery(method: Any):
         rewritten = rewrite_plain_send(runner, result[0])
         if rewritten is result[0]:
             return result
+        spoken = _spoken_text(result[0])
+        if spoken and not await _send_extracted_text(runner, spoken):
+            return result
+        if spoken:
+            _record_delivered_text(runner, spoken)
         return (rewritten, *result[1:])
 
     return resolve_tool_exec
@@ -164,7 +177,11 @@ def _wrap_tool_loop(method: Any):
                     await _deliver_pending_run(
                         runner, response, pending, call_index, delivered
                     )
+                    await _deliver_call_tail(
+                        runner, response, pending, call_index, delivered
+                    )
                     call_index += 1
+                _note_tool_result(item, runner, response, call_index - 1)
                 yield item
         finally:
             await _finish_pending_runs(runner, response, pending, delivered)
@@ -253,6 +270,7 @@ def _extract_mixed_runs(runner: Any, response: Any) -> list[dict[str, Any]]:
                         "text": "\n".join(parts),
                         "before": before,
                         "payload": target,
+                        "sent": False,
                     }
                 )
                 parts.clear()
@@ -346,9 +364,47 @@ async def _deliver_pending_run(
         pending.remove(run)
         text = str(run.get("text", ""))
         if await _send_extracted_text(runner, text):
+            run["sent"] = True
+            _remember_sent_text(run, text)
             delivered.append(text)
             continue
         _restore_run(run)
+
+
+async def _deliver_call_tail(
+    runner: Any,
+    response: Any,
+    pending: list[dict[str, Any]],
+    call_index: int,
+    delivered: list[str],
+) -> None:
+    """Send text that follows the media in the tool call just started.
+
+    Args:
+        runner: Agent runner whose event receives the text.
+        response: Model response containing the remaining tool arguments.
+        pending: Runs that have not yet been sent or restored.
+        call_index: Tool execution that owns the trailing text.
+        delivered: Texts accepted for the conversation history.
+    """
+    args = getattr(response, "tools_call_args", None)
+    payload = (
+        args[call_index] if isinstance(args, list) and call_index < len(args) else None
+    )
+    ready = [
+        run
+        for run in pending
+        if run.get("before") is None and run.get("payload") is payload
+    ]
+    for run in ready:
+        pending.remove(run)
+        text = str(run.get("text", ""))
+        if await _send_extracted_text(runner, text):
+            run["sent"] = True
+            _remember_sent_text(run, text)
+            delivered.append(text)
+        else:
+            _restore_run(run)
 
 
 async def _finish_pending_runs(
@@ -369,6 +425,8 @@ async def _finish_pending_runs(
         pending.remove(run)
         text = str(run.get("text", ""))
         if await _send_extracted_text(runner, text):
+            run["sent"] = True
+            _remember_sent_text(run, text)
             delivered.append(text)
         else:
             _restore_run(run)
@@ -394,6 +452,70 @@ async def _send_extracted_text(runner: Any, text: str) -> bool:
     except Exception:  # noqa: BLE001
         logger.exception("[OutputEnhance] Failed to send extracted tool text.")
         return False
+
+
+def _remember_sent_text(run: dict[str, Any], text: str) -> None:
+    """Store text sent for one tool call so its receipt can mention it.
+
+    Args:
+        run: Extracted run linked to its original payload.
+        text: Text accepted by the sender.
+    """
+    payload = run.get("payload")
+    if not isinstance(payload, dict) or not text:
+        return
+    sent = payload.setdefault("_output_enhance_sent_text", [])
+    if isinstance(sent, list):
+        sent.append(text)
+
+
+def _note_tool_result(item: Any, runner: Any, response: Any, call_index: int) -> None:
+    """Use AstrBot's normal success receipt when extracted text was sent.
+
+    Args:
+        item: Progress or result item yielded for one tool.
+        runner: Agent runner carrying the current session.
+        response: Model response containing the tool arguments.
+        call_index: Tool execution that produced the item.
+    """
+    chain = getattr(item, "message_chain", None)
+    components = getattr(chain, "chain", None)
+    if (
+        getattr(item, "kind", None) != "message_chain"
+        or getattr(chain, "type", None) != "tool_call_result"
+        or not isinstance(components, list)
+        or not components
+    ):
+        return
+    data = getattr(components[0], "data", None)
+    if not isinstance(data, dict) or not _sent_tool_text(response, call_index):
+        return
+    current = str(data.get("result", ""))
+    if current.startswith(("Message sent to session ", "error:")):
+        return
+    session = _current_session(runner)
+    if session:
+        data["result"] = f"Message sent to session {session}"
+
+
+def _sent_tool_text(response: Any, call_index: int) -> bool:
+    """Return whether the plugin sent text for one tool call.
+
+    Args:
+        response: Model response containing the tool arguments.
+        call_index: Tool execution being reported.
+
+    Returns:
+        True when at least one extracted run from that call was sent.
+    """
+    args = getattr(response, "tools_call_args", None)
+    if not isinstance(args, list) or not 0 <= call_index < len(args):
+        return False
+    payload = args[call_index]
+    if not isinstance(payload, dict):
+        return False
+    sent = payload.get("_output_enhance_sent_text")
+    return isinstance(sent, list) and bool(sent)
 
 
 def _restore_run(run: dict[str, Any]) -> None:
@@ -438,7 +560,7 @@ def rewrite_plain_send(runner: Any, response: Any) -> Any:
 
     Returns:
         The original response, or a copied assistant response. Text attached
-        to the same response comes before the tool text.
+        to the same response is sent separately before the tool text.
     """
     text = extract_plain_send(runner, response)
     if text is None:
@@ -454,7 +576,7 @@ def rewrite_plain_send(runner: Any, response: Any) -> Any:
 def extract_plain_send(runner: Any, response: Any) -> str | None:
     """Return text only when this one call can safely become a normal reply.
 
-    Text attached to the same response is kept before the tool text. Images or
+    Text attached to the same response is sent as its own message. Images or
     other components in that response cannot join the plain reply, so those
     calls stay tool calls.
 
@@ -463,8 +585,7 @@ def extract_plain_send(runner: Any, response: Any) -> str | None:
         response: Completed model response to inspect.
 
     Returns:
-        Assistant text followed by the tool text, or None when the call must
-        stay a tool call.
+        The tool text, or None when the call must stay a tool call.
     """
     if getattr(response, "is_chunk", False):
         return None
@@ -499,10 +620,7 @@ def extract_plain_send(runner: Any, response: Any) -> str | None:
         if not text:
             return None
         texts.append(text)
-    tool_text = "\n".join(texts)
-    if not spoken:
-        return tool_text
-    return f"{spoken}\n{tool_text}"
+    return "\n".join(texts)
 
 
 def _spoken_text(response: Any) -> str | None:
